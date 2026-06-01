@@ -14,11 +14,14 @@ async function redrawWithState(nextState, snap, forceSignature = false) {
 }
 
 async function scrubShot(manifest, index, time) {
-  const snap = captureScrollState();
   const result = await postJson('/api/shot-scrub', { manifest, index, time });
   if (!result.ok) return alert(result.error || 'Could not update shot frame');
 
-  await redrawWithState(null, snap);
+  state = await api(stateUrl());
+  pruneSelected();
+  refreshShotRows('references', [index]);
+  updateRunLogs();
+  lastRenderSignature = renderSignature();
 }
 
 async function saveShotPrompt(manifest, index, prompt) {
@@ -151,11 +154,14 @@ async function splitShot(manifest, index) {
 }
 
 async function setShotBoundary(manifest, index, edge, time) {
-  const snap = captureScrollState();
   const result = await postJson('/api/shot-boundary', { manifest, index, edge, time });
   if (!result.ok) return alert(result.error || 'Could not update shot boundary');
 
-  await redrawWithState(result.state, snap, true);
+  state = result.state || await api(stateUrl());
+  pruneSelected();
+  refreshShotRows('shots', [index, edge === 'start' ? index - 1 : index + 1]);
+  updateRunLogs();
+  lastRenderSignature = renderSignature();
 }
 
 async function saveShotFade(manifest, index, enabled, crossfade_seconds) {

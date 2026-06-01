@@ -111,7 +111,11 @@ function shotCards(mode) {
     return '<p class="shot-empty">No shot manifest yet. Run Shot Detection first.</p>';
   }
 
-  return `<div class="shot-list">${rows.map(row => shotCard(mode, manifest, row) + shotTransitionControl(mode, manifest, row)).join('')}</div>`;
+  return `<div class="shot-list">${rows.map(row => shotListEntry(mode, manifest, row)).join('')}</div>`;
+}
+
+function shotListEntry(mode, manifest, row) {
+  return shotCard(mode, manifest, row) + shotTransitionControl(mode, manifest, row);
 }
 
 function shotCard(mode, manifest, row) {
@@ -166,7 +170,7 @@ function shotBoundaryCard(context) {
     : '';
 
   return `
-    <article class="shot-card">
+    <article class="shot-card" data-shot-card-mode="shots" data-shot-card-index="${idx}">
       ${shotSummary(context, `<div class="shot-tools">${mergeButton}${splitButton}</div>`)}
       ${boundaryFrameCard(context, 'start')}
       <div>
@@ -183,7 +187,7 @@ function shotTransitionControl(mode, manifest, row) {
   const checked = String(row.fade_to_next || '').toLowerCase() === 'true';
   const value = row.crossfade_seconds || '1.0';
   return `
-    <div class="shot-transition">
+    <div class="shot-transition" data-shot-transition-mode="${mode}" data-shot-transition-index="${row.index}">
       <span>Between shot ${row.index + 1} and ${row.index + 2}</span>
       <label>
         <input
@@ -255,7 +259,7 @@ function colourSegmentCard(context) {
   const status = enabled ? (colorReady ? `Ready for ${colorizationLabel(method)}` : 'Missing color reference') : 'Disabled in manifest';
 
   return `
-    <article class="shot-card">
+    <article class="shot-card" data-shot-card-mode="colour" data-shot-card-index="${idx}">
       ${shotSummary(context, `<p class="shot-empty">${status}</p>`)}
       <div>
         <label>Color reference</label>
@@ -286,7 +290,7 @@ function referenceCard(context) {
   const img = `shotImg_references_${idx}`;
 
   return `
-    <article class="shot-card">
+    <article class="shot-card" data-shot-card-mode="references" data-shot-card-index="${idx}">
       ${shotSummary(context, referenceTimeControl(manifest, row, idx, slider, label, img))}
       <div>
         <label>B&W screenshot</label>
@@ -299,6 +303,36 @@ function referenceCard(context) {
       <div>${referencePromptTools(context)}</div>
     </article>
   `;
+}
+
+function refreshShotRows(mode, indices) {
+  const view = state.shot_views || {};
+  const rows = view[mode] || [];
+  const manifest = view[mode + '_manifest'] || '';
+  const unique = [...new Set(indices)]
+    .filter(index => Number.isInteger(index) && index >= 0 && index < rows.length)
+    .sort((a, b) => a - b);
+
+  for (const index of unique) {
+    const row = rows[index];
+    const card = document.querySelector(`[data-shot-card-mode="${mode}"][data-shot-card-index="${index}"]`);
+    if (card) {
+      card.outerHTML = shotCard(mode, manifest, row);
+    }
+
+    const transition = document.querySelector(`[data-shot-transition-mode="${mode}"][data-shot-transition-index="${index}"]`);
+    const transitionHtml = shotTransitionControl(mode, manifest, row);
+    if (transition && transitionHtml) {
+      transition.outerHTML = transitionHtml;
+    } else if (transition) {
+      transition.remove();
+    } else if (transitionHtml) {
+      const updatedCard = document.querySelector(`[data-shot-card-mode="${mode}"][data-shot-card-index="${index}"]`);
+      if (updatedCard) updatedCard.insertAdjacentHTML('afterend', transitionHtml);
+    }
+  }
+
+  if (mode === 'references') wireReferenceTimeControls();
 }
 
 function referenceTimeControl(manifest, row, idx, slider, label, img) {
