@@ -29,6 +29,7 @@ from .config import (
     FILE_PREVIEW_DIR,
     IMAGE_EXTS,
     MEDIA_CLIP_DIR,
+    OUTPAINT_PROMPT,
     PREVIEW_DIR,
     REFERENCE_PROMPT,
     REFERENCE_PROMPT_SUFFIX,
@@ -149,6 +150,11 @@ def load_settings() -> dict[str, dict[str, str]]:
         defaults["global"]["expand_outpaint"] = "true"
     if "colormnet" in defaults["recomp"].get("colorized_video", "").lower():
         defaults["recomp"]["colorized_video"] = ""
+    old_outpaint_prompts = {
+        "Outpaint the black margins with a natural continuation of the black-and-white film frame. Replace all black padding/bars with coherent background, clothing, bodies, props, and set detail that matches the original centre footage. Preserve camera motion, composition, lighting, film grain, and monochrome style. Do not colorize.",
+    }
+    if defaults["outpaint"].get("prompt", "") in old_outpaint_prompts:
+        defaults["outpaint"]["prompt"] = OUTPAINT_PROMPT
     defaults["colour"].setdefault("method", "deepexemplar")
     defaults["recomp"].setdefault("colorization_method", "deepexemplar")
     bundled_output = rel(ROOT / "tools" / "comfyui" / "output")
@@ -689,6 +695,8 @@ class PipelineApp:
             add(["--target-height", str(resolved_outpaint_height(pipeline_source_text(self.settings), values.get("target_height", "720")))])
             add(["--chunk-seconds", values.get("chunk_seconds", "20")])
             add(["--overlap-frames", values.get("overlap_frames", "8")])
+            if values.get("prompt"):
+                add(["--prompt", values.get("prompt", "")])
             if values.get("negative_prompt"):
                 add(["--negative-prompt", values.get("negative_prompt", "")])
             if values.get("guide_strength"):

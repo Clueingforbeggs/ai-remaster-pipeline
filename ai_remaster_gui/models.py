@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .config import REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX
+from .config import OUTPAINT_PROMPT, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX
 
 COLORIZE_STAGE_KEYS = {"shots", "references", "colour"}
 
@@ -28,6 +28,7 @@ STAGES = (
             ("target_height", "Output height", "select:source|480|544|576|720|768|1080", "720"),
             ("chunk_seconds", "Chunk seconds", "number", "20"),
             ("overlap_frames", "Overlap frames", "range:0|48|1", "8"),
+            ("prompt", "Prompt", "text", OUTPAINT_PROMPT),
             ("negative_prompt", "Negative prompt", "text", "cartoon, game, 3d render, still image, static, warped geometry, flicker, smeared details, extra fingers, broken fingers, deformed hands"),
             ("crop_left", "Crop left", "range:0|960|1", "0"),
             ("crop_right", "Crop right", "range:0|960|1", "0"),

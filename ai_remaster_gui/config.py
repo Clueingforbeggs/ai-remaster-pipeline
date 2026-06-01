@@ -19,6 +19,7 @@ TEXT_EXTS = {".csv", ".json", ".txt", ".log", ".md"}
 
 REFERENCE_PROMPT = "Colorize this image."
 REFERENCE_PROMPT_SUFFIX = "Preserve composition, lighting, identity, and detail. Do not add text or new objects."
+OUTPAINT_PROMPT = "outpaint"
 
 
 def load_config() -> dict[str, str]:

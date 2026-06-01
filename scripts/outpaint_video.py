@@ -32,6 +32,7 @@ from prepare_outpaint_input import even, parse_aspect, probe_video
 
 DEFAULT_WORKFLOW = ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json"
 DEFAULT_COMFY_DIR = ROOT / "tools" / "comfyui"
+DEFAULT_OUTPAINT_PROMPT = "outpaint"
 RECOMMENDED_OVERLAP_FRAMES = 8
 MODEL_SIZE_MULTIPLE = 32
 OUTPAINT_REQUIRED_NODES = {
@@ -959,7 +960,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--positive-node-id", default="2483")
     parser.add_argument("--negative-node-id", default="2612")
     parser.add_argument("--prompt-widget", default="0")
-    parser.add_argument("--prompt", default="naturalistic period film footage, coherent background extension, preserve camera motion, realistic cinematic lighting")
+    parser.add_argument("--prompt", default=DEFAULT_OUTPAINT_PROMPT)
     parser.add_argument("--seed-node-id", default="4832")
     parser.add_argument("--seed-widget", default="0")
     parser.add_argument("--seed", type=int, default=42)
