@@ -122,6 +122,18 @@ class GuiSmokeTests(unittest.TestCase):
                 for symbol in symbols:
                     self.assertIn(symbol, texts)
 
+    def test_outpaint_prompt_bypasses_unbundled_kj_padding_node(self) -> None:
+        workflow = json.loads((app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json").read_text(encoding="utf-8-sig"))
+
+        outpaint_video.bypass_optional_preview_nodes(workflow)
+        outpaint_video.bypass_demo_padding_node(workflow)
+        prompt = comfy_api.workflow_to_prompt(workflow, "5076")
+
+        class_types = {node["class_type"] for node in prompt.values()}
+        self.assertNotIn("ImagePadKJ", class_types)
+        self.assertIn("VHS_LoadVideo", class_types)
+        self.assertIn("VHS_VideoCombine", class_types)
+
     def test_colormnet_correlation_extension_install_is_opt_in(self) -> None:
         downloader_path = app.ROOT / "vendor" / "comfyui_custom_nodes" / "reference-video-colorization" / "colormnet" / "downloader.py"
         spec = importlib.util.spec_from_file_location("colormnet_downloader_under_test", downloader_path)

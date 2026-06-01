@@ -302,6 +302,16 @@ def bypass_optional_preview_nodes(workflow: dict[str, Any]) -> None:
         pass
 
 
+def bypass_demo_padding_node(workflow: dict[str, Any]) -> None:
+    """Route around KJNodes' ImagePadKJ when ARP has already prepared the canvas."""
+    try:
+        source_link = input_link(workflow, "5086", "image")
+        if source_link is not None:
+            set_input_link(workflow, "5026", "input", source_link)
+    except KeyError:
+        pass
+
+
 # The LTX example workflow is a frontend graph with stable-but-opaque node IDs.
 # Keep ARP's edits explicit here so model/backend assumptions remain auditable.
 def patch_lightweight_gguf(workflow: dict[str, Any], args) -> None:
@@ -581,13 +591,8 @@ def patch_workflow(args, workflow: dict[str, Any], prepared: Path, comfy_dir: Pa
             except KeyError:
                 pass
 
-    # ARP prepares the black target canvas itself, so disable the workflow's demo padding node if present.
-    try:
-        pad_node = node_by_id(workflow, "5086")
-        if isinstance(pad_node.get("widgets_values"), list) and len(pad_node["widgets_values"]) >= 4:
-            pad_node["widgets_values"][0:4] = [0, 0, 0, 0]
-    except KeyError:
-        pass
+    # ARP prepares the black target canvas itself, so the workflow's demo padding node is unnecessary.
+    bypass_demo_padding_node(workflow)
 
     # Extra guide frames via LTXVAddGuideAdvanced — inserted after GGUF patching so the VAE
     # source is already resolved.  Each guide is chained off the previous one.
