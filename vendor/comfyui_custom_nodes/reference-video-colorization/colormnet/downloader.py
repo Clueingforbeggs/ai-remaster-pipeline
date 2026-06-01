@@ -10,6 +10,11 @@ import urllib.request
 import shutil
 
 
+def optional_correlation_install_enabled() -> bool:
+    value = os.environ.get("COLORMNET_INSTALL_CORRELATION_EXTENSION", "")
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def ensure_gdown():
     """Ensure gdown is installed."""
     try:
@@ -245,8 +250,15 @@ def try_install_correlation_sampler() -> Tuple[bool, str]:
         print("[ColorMNet] ✓ Using PyTorch fallback implementation (fully functional)")
         return False, "Missing CUDA development tools - using fallback"
 
-    # Try to install
+    # Try to install only when explicitly requested. The extension is optional,
+    # and pip build isolation can fail to see torch on Windows clean installs.
     print("[ColorMNet] ✓ All compilation prerequisites found")
+    if not optional_correlation_install_enabled():
+        print("[ColorMNet] Optional spatial_correlation_sampler is not installed")
+        print("[ColorMNet] Skipping compilation by default; set COLORMNET_INSTALL_CORRELATION_EXTENSION=1 to try it")
+        print("[ColorMNet] ✓ Using PyTorch fallback implementation (fully functional)")
+        return False, "Optional CUDA extension not installed - using fallback"
+
     print("[ColorMNet] Attempting to install spatial_correlation_sampler...")
     print("[ColorMNet] This may take 2-5 minutes to compile...")
 
@@ -254,6 +266,7 @@ def try_install_correlation_sampler() -> Tuple[bool, str]:
         subprocess.check_call([
             sys.executable, "-m", "pip", "install",
             "git+https://github.com/ClementPinard/Pytorch-Correlation-extension.git",
+            "--no-build-isolation",
             "--no-cache-dir"
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600)
 
@@ -310,15 +323,19 @@ def ensure_dependencies() -> bool:
         import spatial_correlation_sampler
         print("[ColorMNet] ✓ Pytorch-Correlation-extension available")
     except (ImportError, SyntaxError):
-        print("[ColorMNet] Pytorch-Correlation-extension not found, installing...")
-        print("[ColorMNet] Note: This may require C++ compiler on Windows")
-        installed = install_git_dependency(
-            "https://github.com/ClementPinard/Pytorch-Correlation-extension.git",
-            "Pytorch-Correlation-extension"
-        )
-        if not installed:
-            print("[ColorMNet] ⚠ Pytorch-Correlation-extension failed (may work without it)")
-            # Don't set all_ok to False - this is optional
+        if optional_correlation_install_enabled():
+            print("[ColorMNet] Pytorch-Correlation-extension not found, installing...")
+            print("[ColorMNet] Note: This may require C++ compiler on Windows")
+            installed = install_git_dependency(
+                "https://github.com/ClementPinard/Pytorch-Correlation-extension.git",
+                "Pytorch-Correlation-extension"
+            )
+            if not installed:
+                print("[ColorMNet] ⚠ Pytorch-Correlation-extension failed (may work without it)")
+                # Don't set all_ok to False - this is optional
+        else:
+            print("[ColorMNet] Pytorch-Correlation-extension not found; using fallback implementation")
+            print("[ColorMNet] Set COLORMNET_INSTALL_CORRELATION_EXTENSION=1 to try building the optional CUDA extension")
 
     return all_ok
 

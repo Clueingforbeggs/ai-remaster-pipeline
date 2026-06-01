@@ -837,7 +837,7 @@ Invoke-Step 'Install custom-node requirements' {
         Install-RequirementsIfPresent (Join-Path $CustomNodes 'reference-video-colorization\requirements.txt')
         Install-Pip @('scikit-image', 'einops', 'tqdm', 'matplotlib')
         if ($InstallCorrelationExtension) {
-            Install-Pip @('git+https://github.com/ClementPinard/Pytorch-Correlation-extension.git')
+            Install-Pip @('git+https://github.com/ClementPinard/Pytorch-Correlation-extension.git', '--no-build-isolation')
         } else {
             Write-Host 'Skipping Pytorch-Correlation-extension. The Deep Exemplar node usually starts without it; pass -InstallCorrelationExtension to try building it.'
         }

@@ -10,6 +10,8 @@ import urllib.request
 import unittest
 import sys
 import argparse
+import importlib.util
+import os
 from unittest import mock
 from pathlib import Path
 
@@ -119,6 +121,21 @@ class GuiSmokeTests(unittest.TestCase):
                 texts = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in package.rglob("*.py"))
                 for symbol in symbols:
                     self.assertIn(symbol, texts)
+
+    def test_colormnet_correlation_extension_install_is_opt_in(self) -> None:
+        downloader_path = app.ROOT / "vendor" / "comfyui_custom_nodes" / "reference-video-colorization" / "colormnet" / "downloader.py"
+        spec = importlib.util.spec_from_file_location("colormnet_downloader_under_test", downloader_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(module.optional_correlation_install_enabled())
+
+        for value in ("1", "true", "yes", "on"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"COLORMNET_INSTALL_CORRELATION_EXTENSION": value}, clear=True):
+                self.assertTrue(module.optional_correlation_install_enabled())
 
     def test_single_reference_rejects_missing_source_before_qwen_startup(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
