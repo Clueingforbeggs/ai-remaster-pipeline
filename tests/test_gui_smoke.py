@@ -175,6 +175,57 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(prompt["37"]["class_type"], "UnetLoaderGGUF")
             self.assertEqual(prompt["37"]["inputs"]["unet_name"], "qwen-image-edit-2511-Q4_K_M.gguf")
 
+    def test_qwen_completion_copies_produced_image_to_requested_output(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "source.png"
+            output = folder / "output.png"
+            produced = folder / "comfy-output.png"
+            workflow = folder / "workflow.json"
+            manifest = folder / "manifest.csv"
+            comfy_dir = folder / "comfy"
+            comfy_output = folder / "comfy-output"
+            source.write_bytes(b"source image bytes")
+            produced.write_bytes(b"produced image bytes")
+            workflow.write_text("{}", encoding="utf-8")
+            comfy_dir.mkdir()
+            comfy_output.mkdir()
+            with manifest.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["source_reference", "color_reference"])
+                writer.writeheader()
+                writer.writerow({"source_reference": str(source), "color_reference": str(output)})
+
+            args = qwen_colorize_references.build_parser().parse_args(
+                [
+                    "--manifest",
+                    str(manifest),
+                    "--workflow",
+                    str(workflow),
+                    "--comfy-dir",
+                    str(comfy_dir),
+                    "--comfy-output-root",
+                    str(comfy_output),
+                    "--model-backend",
+                    "safetensors",
+                    "--no-normalize-to-source-size",
+                    "--force",
+                ]
+            )
+
+            with (
+                mock.patch.object(qwen_colorize_references, "ensure_qwen_image_edit_models"),
+                mock.patch.object(qwen_colorize_references, "wait_for_comfy"),
+                mock.patch.object(qwen_colorize_references, "patch_qwen_model_backend"),
+                mock.patch.object(qwen_colorize_references, "patch_workflow", return_value={}),
+                mock.patch.object(qwen_colorize_references, "queue_prompt", return_value="prompt-id"),
+                mock.patch.object(qwen_colorize_references, "wait_for_prompt", return_value={}),
+                mock.patch.object(qwen_colorize_references, "extract_output_files", return_value=[produced]),
+                mock.patch.object(qwen_colorize_references, "newest_output", return_value=produced),
+            ):
+                self.assertEqual(qwen_colorize_references.main_with_args(args), 0)
+
+            self.assertEqual(output.read_bytes(), b"produced image bytes")
+
     def test_outpaint_chunk_rows_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             manifest = Path(tmp_text) / "chunks.csv"
