@@ -186,7 +186,7 @@ def build_prompt(args: argparse.Namespace, extra_description: str = '', row_prom
 
 def signature(args: argparse.Namespace, workflow_path: Path, source_path: Path, prompt: str) -> dict[str, Any]:
     return {
-        'version': 4,
+        'version': 5,
         'tool': 'qwen_colorize_references.py',
         'source': root_relative(source_path),
         'source_fingerprint': file_fingerprint(source_path),
@@ -200,6 +200,8 @@ def signature(args: argparse.Namespace, workflow_path: Path, source_path: Path, 
         'continuity_reference_count': args.continuity_reference_count,
         'reference_description_max_chars': args.reference_description_max_chars,
         'normalize_to_source_size': not args.no_normalize_to_source_size,
+        'model_backend': args.model_backend,
+        'gguf_model': args.gguf_model if args.model_backend == 'gguf' else None,
     }
 
 
@@ -241,6 +243,7 @@ def subgraph_workflow_to_prompt(args: argparse.Namespace, workflow: dict[str, An
     save_id = 90002
     comfy_image = copy_to_comfy_input(source_path, resolve_path(args.comfy_dir), 'arp_qwen_refs')
     link_lookup = {int(link.get('id')): link for link in links if isinstance(link, dict) and 'id' in link}
+    source_image_link: dict[str, Any] | None = None
 
     def subgraph_input_name(slot: int) -> str:
         if 0 <= slot < len(subgraph_inputs) and isinstance(subgraph_inputs[slot], dict):
@@ -260,6 +263,7 @@ def subgraph_workflow_to_prompt(args: argparse.Namespace, workflow: dict[str, An
             slot = int(link.get('origin_slot', -1))
             input_name = subgraph_input_name(slot)
             if input_name in {'image', 'image1'}:
+                source_image_link = link
                 item['link'] = 900001
             elif input_name in {'image2', 'image3'}:
                 item['link'] = None
@@ -302,6 +306,9 @@ def subgraph_workflow_to_prompt(args: argparse.Namespace, workflow: dict[str, An
             if isinstance(item, dict) and item.get('link') is not None and int(item['link']) in input_link_ids:
                 item['link'] = None
 
+    if not source_image_link:
+        raise RuntimeError('Could not find subgraph source image input link.')
+
     nodes.append(
         {
             'id': load_id,
@@ -311,7 +318,14 @@ def subgraph_workflow_to_prompt(args: argparse.Namespace, workflow: dict[str, An
             'widgets_values': [comfy_image],
         }
     )
-    links.append({'id': 900001, 'origin_id': load_id, 'origin_slot': 0, 'target_id': 16, 'target_slot': 0, 'type': 'IMAGE'})
+    links.append({
+        'id': 900001,
+        'origin_id': load_id,
+        'origin_slot': 0,
+        'target_id': int(source_image_link.get('target_id')),
+        'target_slot': int(source_image_link.get('target_slot', 0)),
+        'type': 'IMAGE',
+    })
 
     output_link = next((link for link in links if isinstance(link, dict) and int(link.get('target_id', 0)) == -20), None)
     if not output_link:
@@ -341,6 +355,9 @@ def subgraph_workflow_to_prompt(args: argparse.Namespace, workflow: dict[str, An
         named = widget_fallback_inputs(class_type, wv)
         if named:
             node['widgets_values'] = named
+        if class_type == 'KSampler' and isinstance(node.get('widgets_values'), dict):
+            node['widgets_values']['seed'] = 1
+            node['widgets_values']['control_after_generate'] = 'fixed'
 
     flat = {'nodes': nodes, 'links': [link_to_list(link) for link in links]}
     return workflow_to_prompt(flat, save_id)

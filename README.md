@@ -186,7 +186,7 @@ The repo stores orchestration code, GUI code, workflows, wrappers, docs, and sma
 ARP bundles the ComfyUI workflow JSONs it needs to queue jobs:
 
 - `workflows/outpaint_ltx/outpaint_LTX-IC.json` for LTX IC outpainting.
-- `workflows/qwen_image_edit/Image Edit (Qwen 2509).json` for Qwen Image Edit reference frames and outpaint guide frames.
+- `workflows/qwen_image_edit/Image Edit (Qwen 2511).json` for Qwen Image Edit reference frames and outpaint guide frames.
 
 Deep Exemplar and ColorMNet video colourisation do not use saved workflow JSON files; ARP builds those ComfyUI API prompts directly from the selected source, manifest, and method. ComfyUI itself and model weights remain external dependencies. ARP bundles the required custom-node packages where their licenses allow redistribution; see `vendor/comfyui_custom_nodes/README.md`.
 

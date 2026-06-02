@@ -5,7 +5,7 @@ ComfyUI blueprints folder.
 Bundled workflows:
 
 - `outpaint_ltx/outpaint_LTX-IC.json` - LTX IC outpainting.
-- `qwen_image_edit/Image Edit (Qwen 2509).json` - Qwen Image Edit reference
+- `qwen_image_edit/Image Edit (Qwen 2511).json` - Qwen Image Edit reference
   frame colourisation and outpaint guide-frame generation.
 
 Video colourisation through Deep Exemplar or ColorMNet is built as a ComfyUI API

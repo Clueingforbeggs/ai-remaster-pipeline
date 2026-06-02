@@ -1,6 +1,6 @@
 This folder contains ARP's bundled Qwen Image Edit workflow.
 
-`Image Edit (Qwen 2509).json` is the default workflow for colour reference
+`Image Edit (Qwen 2511).json` is the default workflow for colour reference
 generation and outpaint guide-frame generation. ARP should be usable without
 depending on a matching workflow already being present in the user's ComfyUI
 blueprints folder.

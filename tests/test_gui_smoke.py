@@ -125,7 +125,7 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_required_comfy_workflows_are_bundled(self) -> None:
         outpaint = app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json"
-        qwen = app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2509).json"
+        qwen = app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2511).json"
 
         for workflow in (outpaint, qwen):
             with self.subTest(workflow=workflow.name):
@@ -133,7 +133,7 @@ class GuiSmokeTests(unittest.TestCase):
                 json.loads(workflow.read_text(encoding="utf-8-sig"))
 
         self.assertEqual(server.default_qwen_workflow({}), app.rel(qwen))
-        self.assertEqual(server.qwen_workflow_for({"workflow": "D:/missing/blueprints/Qwen 2511.json"}, {}), app.rel(qwen))
+        self.assertEqual(server.qwen_workflow_for({"workflow": "D:/missing/blueprints/Qwen Custom.json"}, {}), app.rel(qwen))
 
     def test_required_custom_nodes_are_bundled(self) -> None:
         required = {
@@ -265,7 +265,7 @@ class GuiSmokeTests(unittest.TestCase):
                 "--output",
                 str(output),
                 "--workflow",
-                str(app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2509).json"),
+                str(app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2511).json"),
                 "--dry-run",
             ]
 
@@ -275,22 +275,23 @@ class GuiSmokeTests(unittest.TestCase):
 
             qwen_main.assert_not_called()
 
-    def test_bundled_qwen_2509_subgraph_patches_inputs_by_name(self) -> None:
+    def test_bundled_qwen_2511_subgraph_patches_to_gguf_by_default(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
             folder = Path(tmp_text)
             source = folder / "source.png"
             source.write_bytes(b"placeholder")
             comfy_dir = folder / "comfy"
             (comfy_dir / "input").mkdir(parents=True)
-            workflow = qwen_colorize_references.load_workflow(app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2509).json")
+            workflow = qwen_colorize_references.load_workflow(app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2511).json")
             args = argparse.Namespace(comfy_dir=comfy_dir, model_backend="gguf", gguf_model="qwen-image-edit-2511-Q4_K_M.gguf")
 
             qwen_colorize_references.patch_qwen_model_backend(args, workflow)
             prompt = qwen_colorize_references.patch_workflow(args, workflow, source, folder / "output.png", "Colorize this image.")
 
-            self.assertEqual(prompt["3"]["inputs"]["seed"], 1)
-            self.assertEqual(prompt["37"]["class_type"], "UnetLoaderGGUF")
-            self.assertEqual(prompt["37"]["inputs"]["unet_name"], "qwen-image-edit-2511-Q4_K_M.gguf")
+            self.assertEqual(prompt["169"]["inputs"]["seed"], 1)
+            self.assertEqual(prompt["169"]["inputs"]["control_after_generate"], "fixed")
+            self.assertEqual(prompt["161"]["class_type"], "UnetLoaderGGUF")
+            self.assertEqual(prompt["161"]["inputs"]["unet_name"], "qwen-image-edit-2511-Q4_K_M.gguf")
 
     def test_qwen_completion_copies_produced_image_to_requested_output(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:

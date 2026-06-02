@@ -46,7 +46,7 @@ def default_qwen_workflow(config: dict[str, str]) -> str:
 
     def workflow_rank(path: Path) -> tuple[int, str]:
         name = path.name.lower()
-        if "2509" in name and ("image edit" in name or "image_edit" in name):
+        if "2511" in name and ("image edit" in name or "image_edit" in name):
             return (0, name)
         if "image edit" in name or "image_edit" in name:
             return (1, name)

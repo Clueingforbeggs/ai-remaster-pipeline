@@ -12,9 +12,9 @@ Model downloads are handled on demand by the pipeline stage that needs them. `in
 
 ## Qwen Image Edit
 
-- Diffusion model: `Comfy-Org/Qwen-Image-Edit_ComfyUI/split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors`
+- Diffusion model: `unsloth/Qwen-Image-Edit-2511-GGUF/qwen-image-edit-2511-Q4_K_M.gguf`
 - Text encoder: `Comfy-Org/Qwen-Image_ComfyUI/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors`
 - VAE: `Comfy-Org/Qwen-Image_ComfyUI/split_files/vae/qwen_image_vae.safetensors`
-- Lightning LoRA: `lightx2v/Qwen-Image-Lightning/Qwen-Image-Edit-2509/Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors`
+- Lightning LoRA: `lightx2v/Qwen-Image-Edit-2511-Lightning/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`
 
 These are large files. The downloader skips already-present destination files and keeps Hugging Face cache files under `.cache/huggingface` while downloading.
