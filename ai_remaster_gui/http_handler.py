@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs, unquote, urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 def bind_context(context: dict) -> None:
@@ -63,6 +63,23 @@ class Handler(BaseHTTPRequestHandler):
             path = resolve(parse_qs(parsed.query).get("path", [""])[0])
             text = path.read_text(encoding="utf-8", errors="replace")[-12000:] if path.exists() else ""
             self.send_json({"text": text})
+        elif parsed.path == "/api/openai-models":
+            token = APP.settings.get("references", {}).get("openai_api_key", "").strip()
+            if not token:
+                self.send_json({"ok": False, "error": "Add your OpenAI API key first."})
+                return
+            try:
+                request = Request("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {token}"})
+                with urlopen(request, timeout=10) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                models = sorted(
+                    item.get("id", "")
+                    for item in payload.get("data", [])
+                    if isinstance(item, dict) and model_looks_image_capable(str(item.get("id", "")))
+                )
+                self.send_json({"ok": True, "models": models})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/shot-preview":
             query = parse_qs(parsed.query)
             try:
@@ -194,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/reference-regenerate":
             try:
-                ok, message = APP.run_reference_regeneration(str(data.get("manifest", "")), int(data.get("index", 0)))
+                ok, message = APP.run_reference_regeneration(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("provider", "qwen")))
                 self.send_json({"ok": ok, "message": message, "state": APP.state() if ok else None, "error": "" if ok else message})
             except Exception as exc:
                 APP.log.append(f"Reference regeneration failed: {exc}")
@@ -472,4 +489,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         return
+
+
+def model_looks_image_capable(model_id: str) -> bool:
+    text = model_id.lower()
+    return text.startswith("gpt-image") or text.startswith("dall-e")
 

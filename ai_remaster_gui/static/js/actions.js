@@ -227,9 +227,16 @@ function updateShotBoundaryPreview(manifest, index, time, imgId, labelId, datase
   }, 120);
 }
 
-async function regenerateReference(manifest, index) {
+async function regenerateReference(manifest, index, provider = 'qwen') {
+  if (provider === 'openai' && !((settings('references').openai_api_key || '').trim())) {
+    alert('Add your OpenAI API key in Settings before generating with OpenAI.');
+    active = 'settings';
+    drawTabs();
+    draw();
+    return;
+  }
   const snap = captureScrollState();
-  const result = await postJson('/api/reference-regenerate', { manifest, index });
+  const result = await postJson('/api/reference-regenerate', { manifest, index, provider });
   if (!result.ok) return alert(result.error || 'Could not regenerate reference');
 
   await refreshReferenceRowFromState(result.state, index);

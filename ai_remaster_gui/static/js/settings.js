@@ -9,6 +9,7 @@ function drawSettings() {
       <h2>Settings</h2>
       ${comfySettingsHtml()}
       ${qwenSettingsHtml(refs)}
+      ${openAISettingsHtml(refs)}
       ${pipelineDefaultsHtml(outpaint, colour, recomp)}
       ${logFileSettingsHtml()}
     </section>
@@ -39,6 +40,34 @@ function qwenSettingsHtml(refs) {
     <textarea readonly>${esc(refs.prompt || '')}</textarea>
     <label>Prompt suffix</label>
     <textarea readonly>${esc(refs.prompt_suffix || '')}</textarea>
+  `;
+}
+
+function openAISettingsHtml(refs) {
+  return `
+    <h3>OpenAI Reference Generation</h3>
+    <label>API key</label>
+    <input id="openaiApiKey" type="password" autocomplete="off" value="${esc(refs.openai_api_key || '')}" placeholder="sk-...">
+    <label>Image model</label>
+    <div class="row">
+      <input id="openaiImageModel" value="${esc(refs.openai_image_model || 'gpt-image-2')}">
+      <button type="button" onclick="refreshOpenAIModels()">Query Models</button>
+    </div>
+    <label>Discovered image models</label>
+    <select id="openaiModelList" onchange="selectOpenAIModel(this.value)">
+      <option value="">No query run</option>
+    </select>
+    <label>Size</label>
+    <select id="openaiImageSize">
+      ${['auto', '1024x1024', '1536x1024', '1024x1536'].map(value => `<option value="${value}" ${(refs.openai_image_size || 'auto') === value ? 'selected' : ''}>${value}</option>`).join('')}
+    </select>
+    <label>Quality</label>
+    <select id="openaiImageQuality">
+      ${['auto', 'low', 'medium', 'high'].map(value => `<option value="${value}" ${(refs.openai_image_quality || 'auto') === value ? 'selected' : ''}>${value}</option>`).join('')}
+    </select>
+    <div class="actions">
+      <button type="button" class="primary" onclick="saveOpenAISettings()">Save OpenAI Settings</button>
+    </div>
   `;
 }
 
@@ -77,4 +106,40 @@ async function loadLogFile() {
   const path = document.getElementById('comfyLog').value;
   const result = await api('/api/logfile?path=' + encodeURIComponent(path));
   document.getElementById('comfyLogText').textContent = result.text;
+}
+
+function selectOpenAIModel(model) {
+  if (!model) return;
+  const input = document.getElementById('openaiImageModel');
+  if (input) input.value = model;
+}
+
+async function saveOpenAISettings() {
+  await postJson('/api/settings', {
+    stage: 'references',
+    values: {
+      openai_api_key: document.getElementById('openaiApiKey')?.value || '',
+      openai_image_model: document.getElementById('openaiImageModel')?.value || 'gpt-image-2',
+      openai_image_size: document.getElementById('openaiImageSize')?.value || 'auto',
+      openai_image_quality: document.getElementById('openaiImageQuality')?.value || 'auto',
+    },
+  });
+  state = await api(stateUrl());
+}
+
+async function refreshOpenAIModels() {
+  await saveOpenAISettings();
+  const select = document.getElementById('openaiModelList');
+  if (select) select.innerHTML = '<option value="">Querying...</option>';
+  const result = await api('/api/openai-models');
+  if (!result.ok) {
+    if (select) select.innerHTML = '<option value="">Query failed</option>';
+    return alert(result.error || 'Could not query OpenAI models');
+  }
+  const models = result.models || [];
+  if (select) {
+    select.innerHTML = models.length
+      ? models.map(model => `<option value="${esc(model)}">${esc(model)}</option>`).join('')
+      : '<option value="">No image models returned</option>';
+  }
 }

@@ -123,6 +123,10 @@ def load_settings() -> dict[str, dict[str, str]]:
         defaults["references"]["save_node_id"] = "auto"
     defaults["references"].setdefault("model_backend", "gguf")
     defaults["references"].setdefault("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")
+    defaults["references"].setdefault("openai_api_key", "")
+    defaults["references"].setdefault("openai_image_model", "gpt-image-2")
+    defaults["references"].setdefault("openai_image_size", "auto")
+    defaults["references"].setdefault("openai_image_quality", "auto")
     old_reference_prompts = {
         "",
         "Colorize this image.",

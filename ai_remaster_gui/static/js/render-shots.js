@@ -305,7 +305,7 @@ function referenceCard(context) {
         ${sourceReady ? `<div class="thumb-wrap"><img id="${img}" src="${sourceUrl}" alt=""><button class="icon-button" type="button" title="Save B&W screenshot" onclick="exportMedia('${esc(row.source_reference)}')">&#128190;</button></div>` : missingImage('Image not present')}
       </div>
       <div>
-        <label>Qwen color reference</label>
+        <label>Color reference</label>
         ${colorReady ? colorReferenceThumb(manifest, idx, colorUrl) : missingImage('Image not present')}
       </div>
       <div>${referencePromptTools(context)}</div>
@@ -383,8 +383,6 @@ function referencePromptTools({ manifest, row, idx }) {
     && state.running_reference.index === idx
     && state.running_reference.manifest === manifest;
   const rp = stageProgress('references');
-  const hasReference = !!(row.color_reference && row.color_reference_mtime);
-  const buttonLabel = hasReference ? 'Regenerate Reference' : 'Generate Reference';
 
   return `
     <label>Shot prompt</label>
@@ -393,8 +391,11 @@ function referencePromptTools({ manifest, row, idx }) {
       <button type="button" onclick="chooseCustomReference('${esc(manifest)}',${idx})">
         Use Custom Image
       </button>
-      <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx})" ${state.running ? 'disabled' : ''}>
-        ${regenerating ? 'Regenerating...' : buttonLabel}
+      <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx},'qwen')" ${state.running ? 'disabled' : ''}>
+        ${regenerating ? 'Generating...' : 'Generate with Qwen 2511 (local)'}
+      </button>
+      <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx},'openai')" ${state.running ? 'disabled' : ''}>
+        ${regenerating ? 'Generating...' : 'Generate with OpenAI (cloud)'}
       </button>
       ${regenerating ? '<span class="spinner" aria-label="In progress"></span>' : ''}
     </div>

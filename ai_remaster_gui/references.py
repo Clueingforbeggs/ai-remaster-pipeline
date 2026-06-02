@@ -275,7 +275,7 @@ def preview_reference_frame(manifest_text: str, index: int, seconds: float) -> s
         raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
     return rel(target)
 
-def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list[str], str]:
+def reference_row_io(manifest_text: str, index: int) -> tuple[Path, dict[str, str], str, str]:
     manifest = resolve(manifest_text)
     _source_video, _fields, rows = read_manifest_details(manifest)
     if index < 0 or index >= len(rows):
@@ -285,6 +285,10 @@ def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list
     output = row.get("color_reference", "")
     if not source or not output:
         raise RuntimeError("Manifest row must have source_reference and color_reference.")
+    return manifest, row, source, output
+
+def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list[str], str]:
+    _manifest, row, source, output = reference_row_io(manifest_text, index)
     values = APP.settings.get("references", {})
     config = current_config()
     workflow = qwen_workflow_for(values, config)
@@ -322,6 +326,37 @@ def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list
     ]
     if values.get("prompt_node_id"):
         cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    if row.get("prompt"):
+        cmd.extend(["--add-prompt", row["prompt"]])
+    return cmd, output
+
+def openai_reference_regeneration_command(manifest_text: str, index: int) -> tuple[list[str], str]:
+    _manifest, row, source, output = reference_row_io(manifest_text, index)
+    values = APP.settings.get("references", {})
+    token = values.get("openai_api_key", "").strip()
+    if not token:
+        raise RuntimeError("Add your OpenAI API key in Settings before generating with OpenAI.")
+    cmd = [
+        sys.executable,
+        "-u",
+        str(SCRIPTS / "openai_generate_reference.py"),
+        "--source-image",
+        source,
+        "--output",
+        output,
+        "--api-key",
+        token,
+        "--model",
+        values.get("openai_image_model", "gpt-image-2") or "gpt-image-2",
+        "--prompt",
+        values.get("prompt", REFERENCE_PROMPT),
+        "--prompt-suffix",
+        values.get("prompt_suffix", REFERENCE_PROMPT_SUFFIX),
+    ]
+    if values.get("openai_image_size"):
+        cmd.extend(["--size", values["openai_image_size"]])
+    if values.get("openai_image_quality"):
+        cmd.extend(["--quality", values["openai_image_quality"]])
     if row.get("prompt"):
         cmd.extend(["--add-prompt", row["prompt"]])
     return cmd, output

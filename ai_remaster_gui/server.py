@@ -47,6 +47,7 @@ from .project_io import (
     read_project_file,
     source_analysis_key,
     source_signature,
+    write_project_file,
     bind_context as bind_project_context,
 )
 from .process_utils import (
@@ -73,6 +74,7 @@ from .references import (
     preview_reference_frame,
     recomposition_output_for,
     reference_name_for_time,
+    openai_reference_regeneration_command,
     reference_regeneration_command,
     regenerate_reference_image,
     selected_seconds_from_reference,
@@ -600,9 +602,7 @@ class PipelineApp:
             self.project_path = path
         else:
             path = self.project_path
-        payload = project_payload(self.settings)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_project_file(path, self.settings)
         self.log.append(f"Saved ARP project: {path}")
         return {"path": str(path)}
 
@@ -884,12 +884,17 @@ class PipelineApp:
             threading.Thread(target=self._collect_output, args=("outpaint",), daemon=True).start()
         return True, f"Started outpaint chunk {index + 1}"
 
-    def run_reference_regeneration(self, manifest_text: str, index: int) -> tuple[bool, str]:
-        ok, message = ensure_comfy_available_for_stage("Reference Generation")
-        if not ok:
-            return False, message
+    def run_reference_regeneration(self, manifest_text: str, index: int, provider: str = "qwen") -> tuple[bool, str]:
+        provider = "openai" if provider == "openai" else "qwen"
+        if provider == "qwen":
+            ok, message = ensure_comfy_available_for_stage("Reference Generation")
+            if not ok:
+                return False, message
         try:
-            cmd, output = reference_regeneration_command(manifest_text, index)
+            if provider == "openai":
+                cmd, output = openai_reference_regeneration_command(manifest_text, index)
+            else:
+                cmd, output = reference_regeneration_command(manifest_text, index)
         except Exception as exc:
             return False, str(exc)
         with self.lock:
@@ -900,8 +905,9 @@ class PipelineApp:
             self.running_reference_manifest = manifest_text
             self.running_reference_index = index
             self.run_started_at = time.time()
-            self.log.append(f"Regenerating colour reference for shot {index + 1}: {output}")
-            self.log.append("> " + " ".join(cmd))
+            label = "OpenAI" if provider == "openai" else "Qwen"
+            self.log.append(f"Regenerating colour reference with {label} for shot {index + 1}: {output}")
+            self.log.append("> " + redact_command_for_log(cmd))
             kwargs: dict = {"cwd": ROOT, "text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -918,7 +924,7 @@ class PipelineApp:
                 self.log.append(f"Could not start reference regeneration: {exc}")
                 return False, f"Could not start reference regeneration: {exc}"
             threading.Thread(target=self._collect_output, args=("references",), daemon=True).start()
-        return True, f"Started reference regeneration for shot {index + 1}."
+        return True, f"Started {provider} reference regeneration for shot {index + 1}."
 
     def run_outpaint_end_guide_generation(self, index: int, prompt: str) -> tuple[bool, str]:
         ok, message = ensure_comfy_available_for_stage("End Guide Frame Generation")
@@ -1419,6 +1425,20 @@ def _truthy_payload_value(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def redact_command_for_log(cmd: list[str]) -> str:
+    redacted: list[str] = []
+    hide_next = False
+    for part in cmd:
+        if hide_next:
+            redacted.append("[redacted]")
+            hide_next = False
+            continue
+        redacted.append(part)
+        if part in {"--api-key", "--openai-api-key"}:
+            hide_next = True
+    return " ".join(redacted)
 
 
 def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seconds: str = "", negative_suffix: str = "", guide_strength: str = "", guide_end_strength: str = "", custom_length=None) -> None:

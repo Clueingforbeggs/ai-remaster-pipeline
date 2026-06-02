@@ -13,6 +13,7 @@ import sys
 import argparse
 import importlib.util
 import os
+import zipfile
 from unittest import mock
 from pathlib import Path
 
@@ -611,6 +612,60 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(loaded["global"]["source"], "input/example.mp4")
         self.assertIn("schema_version", app.project_payload(app.APP.settings))
+
+    def test_project_bundle_includes_reference_assets_without_openai_key(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "refs.csv"
+            source = folder / "bw.png"
+            color = folder / "color.png"
+            project = folder / "demo.arpp"
+            source.write_bytes(b"bw")
+            color.write_bytes(b"color")
+            app.write_manifest_details(
+                manifest,
+                "input/example.mp4",
+                ["enabled", "end", "source_reference", "color_reference"],
+                [{"enabled": "true", "end": "00:00:01.000", "source_reference": app.rel(source), "color_reference": app.rel(color)}],
+            )
+            settings = copy.deepcopy(app.APP.settings)
+            settings["references"].update({"manifest": app.rel(manifest), "openai_api_key": "sk-secret"})
+
+            app.write_project_file(project, settings)
+
+            with zipfile.ZipFile(project) as archive:
+                names = set(archive.namelist())
+                payload = json.loads(archive.read("project.json").decode("utf-8"))
+
+            self.assertIn(app.rel(manifest).replace("\\", "/"), names)
+            self.assertIn(app.rel(source).replace("\\", "/"), names)
+            self.assertIn(app.rel(color).replace("\\", "/"), names)
+            self.assertNotIn("openai_api_key", payload["settings"]["references"])
+
+    def test_openai_reference_command_requires_key_and_uses_selected_model(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "refs.csv"
+            source = folder / "bw.png"
+            color = folder / "color.png"
+            source.write_bytes(b"bw")
+            app.write_manifest_details(
+                manifest,
+                "input/example.mp4",
+                ["enabled", "end", "source_reference", "color_reference", "prompt"],
+                [{"enabled": "true", "end": "00:00:01.000", "source_reference": app.rel(source), "color_reference": app.rel(color), "prompt": "warm highlights"}],
+            )
+            app.APP.settings["references"].update({"openai_api_key": "", "openai_image_model": "gpt-image-2"})
+
+            with self.assertRaisesRegex(RuntimeError, "OpenAI API key"):
+                app.openai_reference_regeneration_command(str(manifest), 0)
+
+            app.APP.settings["references"].update({"openai_api_key": "sk-test", "openai_image_model": "gpt-image-1"})
+            command, output = app.openai_reference_regeneration_command(str(manifest), 0)
+
+            self.assertIn("openai_generate_reference.py", " ".join(command))
+            self.assertEqual(command[command.index("--model") + 1], "gpt-image-1")
+            self.assertEqual(output, app.rel(color))
 
     def test_project_save_suggestion_uses_last_browse_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
