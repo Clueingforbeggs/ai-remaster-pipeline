@@ -21,6 +21,7 @@ import comfy_api  # noqa: E402
 import colorize_video  # noqa: E402
 import generate_single_reference  # noqa: E402
 import outpaint_video  # noqa: E402
+import prepare_outpaint_input  # noqa: E402
 import qwen_colorize_references  # noqa: E402
 
 from ai_remaster_gui import app
@@ -80,10 +81,38 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(app.outpaint_output_for("input/My Source.mp4", "16:9", "720"), "intermediate/outpainted/My_Source_16x9_1280x704_outpainted.mp4")
 
     def test_source_height_outpaint_option_uses_video_height(self) -> None:
+        app.APP.settings.setdefault("outpaint", {}).update(
+            {
+                "crop_left": "0",
+                "crop_right": "0",
+                "crop_top": "0",
+                "crop_bottom": "0",
+            }
+        )
         with mock.patch.object(server, "video_metrics", return_value={"height": 480}):
             output = app.outpaint_output_for("input/My Source.mp4", "16:9", "source")
 
         self.assertEqual(output, "intermediate/outpainted/My_Source_16x9_854x480_outpainted.mp4")
+
+    def test_outpaint_source_crop_preserves_original_source_scale(self) -> None:
+        args = argparse.Namespace(
+            delivery_width=1280,
+            delivery_height=720,
+            crop_left=0,
+            crop_right=0,
+            crop_top=270,
+            crop_bottom=270,
+            black_lift=0.018,
+            gamma=1.06,
+        )
+        info = {"width": 1440, "height": 1080, "fps": 24.0}
+
+        self.assertEqual(prepare_outpaint_input.source_placement_size(args, info, 1280, 704), (960, 360, 960, 352))
+
+        filter_text = prepare_outpaint_input.build_filter(args, info, 1280, 704)
+
+        self.assertIn("crop=w=1440:h=540:x=0:y=270,scale=w=960:h=360:flags=lanczos,scale=w=960:h=352:flags=lanczos", filter_text)
+        self.assertNotIn("force_original_aspect_ratio=decrease", filter_text)
 
     def test_portable_comfy_parent_resolves_to_inner_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -134,6 +163,81 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertNotIn("ImagePadKJ", class_types)
         self.assertIn("VHS_LoadVideo", class_types)
         self.assertIn("VHS_VideoCombine", class_types)
+
+    def test_outpaint_prompt_sent_to_ic_lora_guide_is_global_outpaint_only(self) -> None:
+        workflow = json.loads((app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json").read_text(encoding="utf-8-sig"))
+        args = outpaint_video.build_parser().parse_args(
+            [
+                "--source",
+                "input/example.mp4",
+                "--comfy-dir",
+                str(app.ROOT),
+                "--prompt",
+                "outpaint",
+                "--dry-run",
+            ]
+        )
+
+        with (
+            mock.patch.object(outpaint_video, "copy_to_comfy_input", return_value="arp_outpaint/prepared.mp4"),
+            mock.patch.object(outpaint_video, "copy_reference_frame_to_comfy_input", return_value="arp_outpaint/reference.png"),
+            mock.patch.object(outpaint_video, "probe_video", return_value={"width": 1280, "height": 704, "frames": 24, "fps": 24.0}),
+        ):
+            prompt = outpaint_video.patch_workflow(
+                args,
+                workflow,
+                app.ROOT / "prepared.mp4",
+                app.ROOT,
+                "arp_outpaint/test",
+                outpaint_video.combine_prompt(args.prompt, ""),
+                args.negative_prompt,
+                42,
+            )
+
+        self.assertEqual(prompt["2483"]["inputs"]["text"], "outpaint")
+        self.assertEqual(prompt["5012"]["inputs"]["positive"], ["1241", 0])
+        self.assertEqual(prompt["1241"]["inputs"]["positive"], ["2483", 0])
+
+    def test_outpaint_command_forces_global_prompt_to_outpaint(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "0", "section_end": ""})
+        app.APP.settings["outpaint"].update(
+            {
+                "target_aspect": "16:9",
+                "target_height": "720",
+                "chunk_seconds": "20",
+                "overlap_frames": "8",
+                "prompt": "stale verbose prompt that should not reach the LoRA",
+                "crop_left": "0",
+                "crop_right": "0",
+                "crop_top": "0",
+                "crop_bottom": "0",
+            }
+        )
+
+        command = app.APP.command_for("outpaint")
+
+        self.assertEqual(command[command.index("--prompt") + 1], "outpaint")
+
+    def test_outpaint_manifest_sync_clears_chunk_prompt_suffixes(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            outpaint_video.write_chunk_manifest(
+                manifest,
+                [
+                    {
+                        "chunk_index": "0",
+                        "start_frame": "0",
+                        "end_frame": "10",
+                        "seed": "42",
+                        "prompt_suffix": "stale per-chunk direction",
+                    }
+                ],
+            )
+
+            rows = outpaint_video.sync_chunk_manifest(manifest, [(0, 0, 10)], 24.0, folder, 42)
+
+            self.assertEqual(rows[0]["prompt_suffix"], "")
 
     def test_colormnet_correlation_extension_install_is_opt_in(self) -> None:
         downloader_path = app.ROOT / "vendor" / "comfyui_custom_nodes" / "reference-video-colorization" / "colormnet" / "downloader.py"

@@ -68,9 +68,29 @@ def crop_values(args, info: dict) -> tuple[int, int, int, int, int, int]:
     return left, right, top, bottom, width, height
 
 
+def fit_size(width: int, height: int, target_width: int, target_height: int) -> tuple[int, int]:
+    scale = min(target_width / width, target_height / height)
+    out_width = min(target_width, max(2, even(width * scale)))
+    out_height = min(target_height, max(2, even(height * scale)))
+    return out_width, out_height
+
+
+def source_placement_size(args, info: dict, target_width: int, target_height: int) -> tuple[int, int, int, int]:
+    delivery_w = int(args.delivery_width or target_width)
+    delivery_h = int(args.delivery_height or target_height)
+    _left, _right, _top, _bottom, crop_width, crop_height = crop_values(args, info)
+    full_w, full_h = fit_size(int(info["width"]), int(info["height"]), delivery_w, delivery_h)
+    source_scale = min(full_w / int(info["width"]), full_h / int(info["height"]))
+    delivery_source_w = min(delivery_w, max(2, even(crop_width * source_scale)))
+    delivery_source_h = min(delivery_h, max(2, even(crop_height * source_scale)))
+    target_source_w = min(target_width, max(2, even(delivery_source_w * target_width / delivery_w)))
+    target_source_h = min(target_height, max(2, even(delivery_source_h * target_height / delivery_h)))
+    return delivery_source_w, delivery_source_h, target_source_w, target_source_h
+
+
 def signature(args, source: Path, info: dict, target_width: int, target_height: int) -> dict:
     return {
-        'version': 5,
+        'version': 6,
         'tool': 'prepare_outpaint_input.py',
         'source': root_relative(source),
         'source_fingerprint': file_fingerprint(source),
@@ -106,31 +126,16 @@ def build_filter(args, info: dict, target_width: int, target_height: int) -> str
     # at t=0 but the source has not yet produced a frame.
     #
     # Two-step scaling when delivery dimensions differ from target (model-safe) dimensions:
-    #   Step 1 – scale to fit DELIVERY dimensions, preserving source AR.
-    #            This gives the same pillar/letter-bar geometry as the delivery frame.
-    #   Step 2 – squish the axis that changed from delivery → model-safe, non-AR-preserving.
-    #            Landscape: squish height (e.g. 720→704), width unchanged.
-    #            Portrait:  squish width  (e.g. 720→704), height unchanged.
-    # When delivery == target the second scale is a no-op.
-    delivery_w = int(args.delivery_width or target_width)
-    delivery_h = int(args.delivery_height or target_height)
-    if delivery_w == target_width and delivery_h == target_height:
-        scale_steps = f"scale=w={target_width}:h={target_height}:force_original_aspect_ratio=decrease:flags=lanczos"
-    else:
-        # Step 2 squishes from delivery to model-safe along whichever axis changed.
-        # Landscape: delivery 1280×720 → target 1280×704 — squish height, keep width.
-        # Portrait:  delivery 720×1280 → target 704×1280 — squish width, keep height.
-        # Both differ: squish both (rare, but handled without extra AR distortion).
-        if delivery_w == target_width:
-            squish = f"scale=w=iw:h={target_height}:flags=lanczos"
-        elif delivery_h == target_height:
-            squish = f"scale=w={target_width}:h=ih:flags=lanczos"
-        else:
-            squish = f"scale=w={target_width}:h={target_height}:flags=lanczos"
-        scale_steps = (
-            f"scale=w={delivery_w}:h={delivery_h}:force_original_aspect_ratio=decrease:flags=lanczos,"
-            f"{squish}"
-        )
+    #   Step 1 - scale the cropped source by the same factor the uncropped source would use
+    #            to fit DELIVERY dimensions. Cropping therefore removes pixels; it does not
+    #            promote the crop to become the new full-size source.
+    #   Step 2 - squish the delivery placement proportionally into the model-safe canvas.
+    #            This preserves the existing LTX workaround without forcing cropped sources
+    #            to fill the axis they no longer occupy.
+    delivery_source_w, delivery_source_h, target_source_w, target_source_h = source_placement_size(args, info, target_width, target_height)
+    scale_steps = f"scale=w={delivery_source_w}:h={delivery_source_h}:flags=lanczos"
+    if (delivery_source_w, delivery_source_h) != (target_source_w, target_source_h):
+        scale_steps += f",scale=w={target_source_w}:h={target_source_h}:flags=lanczos"
     return ';'.join([
         f"color=c=black:s={target_width}x{target_height}:r={info['fps']:.8f}[bg]",
         f"[0:v]trim=start_frame=0,setpts=PTS-STARTPTS,crop=w={crop_width}:h={crop_height}:x={left}:y={top},{scale_steps},setsar=1,format=rgb24,lutrgb={lut}[src]",

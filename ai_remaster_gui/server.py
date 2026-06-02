@@ -731,8 +731,7 @@ class PipelineApp:
             add(["--target-height", str(resolved_outpaint_height(pipeline_source_text(self.settings), values.get("target_height", "720")))])
             add(["--chunk-seconds", values.get("chunk_seconds", "20")])
             add(["--overlap-frames", values.get("overlap_frames", "8")])
-            if values.get("prompt"):
-                add(["--prompt", values.get("prompt", "")])
+            add(["--prompt", OUTPAINT_PROMPT])
             if values.get("negative_prompt"):
                 add(["--negative-prompt", values.get("negative_prompt", "")])
             if values.get("guide_strength"):
@@ -1340,7 +1339,7 @@ def outpaint_chunks_state(settings: dict) -> dict:
         row.setdefault("custom_seconds", "")
         if not row.get("seed"):
             row["seed"] = str(42 + index)
-        row.setdefault("prompt_suffix", "")
+        row["prompt_suffix"] = ""
         row.setdefault("negative_suffix", "")
         row.setdefault("guide_image", "")
         row.setdefault("guide_strength", "0.7")
@@ -1432,7 +1431,7 @@ def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seco
         raise IndexError(f"Outpaint chunk not found: {index + 1}")
     row = rows[index]
     row["seed"] = str(int(float(seed or row.get("seed") or 42 + index)))
-    row["prompt_suffix"] = prompt_suffix
+    row["prompt_suffix"] = ""
     row["negative_suffix"] = negative_suffix
     use_custom_length = _truthy_payload_value(custom_length) if custom_length is not None else bool(custom_seconds)
     if use_custom_length and custom_seconds:

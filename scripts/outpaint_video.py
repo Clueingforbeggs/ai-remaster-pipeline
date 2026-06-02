@@ -775,7 +775,7 @@ def sync_chunk_manifest(path: Path, ranges: list[tuple[int, int, int]], fps: flo
         )
         if not row.get("seed"):
             row["seed"] = str(default_seed + chunk_index)
-        row.setdefault("prompt_suffix", "")
+        row["prompt_suffix"] = ""
         row.setdefault("negative_suffix", "")
         row.setdefault("guide_image", "")
         row.setdefault("custom_seconds", "")

@@ -100,7 +100,7 @@ def load_settings() -> dict[str, dict[str, str]]:
     old_outpaint_prompts = {
         "Outpaint the black margins with a natural continuation of the black-and-white film frame. Replace all black padding/bars with coherent background, clothing, bodies, props, and set detail that matches the original centre footage. Preserve camera motion, composition, lighting, film grain, and monochrome style. Do not colorize.",
     }
-    if defaults["outpaint"].get("prompt", "") in old_outpaint_prompts:
+    if defaults["outpaint"].get("prompt", "").strip() != OUTPAINT_PROMPT or defaults["outpaint"].get("prompt", "") in old_outpaint_prompts:
         defaults["outpaint"]["prompt"] = OUTPAINT_PROMPT
     defaults["colour"].setdefault("method", "deepexemplar")
     defaults["recomp"].setdefault("colorization_method", "deepexemplar")
