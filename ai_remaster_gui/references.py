@@ -1,0 +1,434 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from .config import IMAGE_EXTS, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS
+from .manifests import read_manifest, read_manifest_details, update_manifest_row, write_manifest_details
+from .media import extract_video_frame_at
+from .paths import rel, resolve, safe_stem
+
+
+def bind_context(context: dict) -> None:
+    globals().update(context)
+
+
+def recomposition_output_for(outpainted_text: str) -> str:
+    if not outpainted_text:
+        return ""
+    outpainted = resolve(outpainted_text)
+    return rel(ROOT / "output" / "reassembled" / f"{safe_stem(outpainted.name)}_final.mp4")
+
+def colorized_outputs_for_manifest(manifest_text: str, method: str = "deepexemplar") -> list[str]:
+    if method == "both":
+        return [path for path in (colorized_output_for_manifest(manifest_text, "deepexemplar"), colorized_output_for_manifest(manifest_text, "colormnet")) if path]
+    output = colorized_output_for_manifest(manifest_text, method)
+    return [output] if output else []
+
+def colorized_output_for_manifest(manifest_text: str, method: str = "deepexemplar") -> str:
+    if not manifest_text:
+        return ""
+    if method == "both":
+        return ""
+    suffix = "colormnet" if method == "colormnet" else "deepexemplar"
+    manifest = resolve(manifest_text)
+    source_video = manifest_source_video(manifest)
+    if source_video:
+        source = resolve(source_video)
+        return rel(ROOT / "intermediate" / "outpainted_colorized" / f"{safe_stem(source.name)}_{suffix}_colorized.mp4")
+    if manifest_text:
+        stem = safe_stem(Path(manifest_text).stem.replace("colorize_manifest_", "").replace("_shots_auto", ""))
+        return rel(ROOT / "intermediate" / "outpainted_colorized" / f"{stem}_{suffix}_colorized.mp4")
+    return ""
+
+def color_reference_outputs(manifest_text: str) -> list[str]:
+    if not manifest_text:
+        return []
+    manifest = resolve(manifest_text)
+    if not manifest.is_file():
+        return []
+    rows = read_manifest(manifest)
+    return [row.get("color_reference", "") for row in rows if row.get("color_reference")]
+
+def shot_views(settings: dict[str, dict[str, str]]) -> dict[str, object]:
+    shots_manifest = manifest_for_outpainted(settings.get("shots", {}).get("outpainted_video", ""))
+    references_manifest = settings.get("references", {}).get("manifest", "")
+    colour_manifest = settings.get("colour", {}).get("manifest", "") or references_manifest
+    return {
+        "shots_manifest": shots_manifest,
+        "shots": shot_rows(shots_manifest, include_previews=True),
+        "references_manifest": references_manifest,
+        "references": shot_rows(references_manifest),
+        "colour_manifest": colour_manifest,
+        "colour": shot_rows(colour_manifest),
+    }
+
+def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[str, object]]:
+    if not manifest_text:
+        return []
+    path = resolve(manifest_text)
+    rows = read_manifest(path)
+    out: list[dict[str, object]] = []
+    start = 0.0
+    for index, row in enumerate(rows):
+        end = parse_time_seconds(row.get("end", "")) or start
+        selected = selected_seconds_from_reference(row.get("source_reference", "")) or ((start + end) / 2 if end > start else start)
+        selected = max(start, min(end, selected))
+        item = {
+                "index": index,
+                "enabled": row.get("enabled", "true"),
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "start_frame": int(round(start * manifest_fps(path))),
+                "end_frame": max(0, int(round(end * manifest_fps(path))) - 1),
+                "duration": round(max(0.0, end - start), 3),
+                "selected_time": round(selected, 3),
+                "start_label": format_timecode(start),
+                "end_label": format_timecode(end),
+                "selected_label": format_timecode(selected),
+                "source_reference": row.get("source_reference", ""),
+                "color_reference": row.get("color_reference", ""),
+                "source_reference_mtime": file_mtime(row.get("source_reference", "")),
+                "color_reference_mtime": file_mtime(row.get("color_reference", "")),
+                "can_merge_next": index < len(rows) - 1,
+                "can_split": end - start >= 0.1,
+                "can_fade_next": index < len(rows) - 1,
+                "fade_to_next": row.get("fade_to_next", "false"),
+                "crossfade_seconds": row.get("crossfade_seconds", ""),
+                "prompt": row.get("prompt", ""),
+            }
+        if include_previews:
+            mid = (start + end) / 2 if end > start else start
+            for key, value in (("start_preview", start), ("middle_preview", mid), ("end_preview", max(start, end - (1 / max(1.0, manifest_fps(path)))))):
+                try:
+                    item[key] = preview_reference_frame(manifest_text, index, value)
+                except Exception:
+                    item[key] = ""
+        out.append(item)
+        start = end
+    return out
+
+def manifest_fps(path: Path) -> float:
+    source = resolve(manifest_source_video(path))
+    try:
+        rate = ffprobe_info(source).get("frame_rate", "")
+        if rate.endswith(" fps"):
+            return float(rate[:-4])
+    except Exception:
+        pass
+    return 24.0
+
+def file_mtime(path_text: str) -> int:
+    if not path_text:
+        return 0
+    path = resolve(path_text)
+    try:
+        return int(path.stat().st_mtime)
+    except OSError:
+        return 0
+
+def parse_time_seconds(value: str) -> float:
+    value = str(value or "").strip()
+    if not value:
+        return 0.0
+    parts = value.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(value)
+    except ValueError:
+        return 0.0
+
+def selected_seconds_from_reference(path_text: str) -> float:
+    stem = Path(path_text).stem
+    parts = stem.split("_")
+    if len(parts) < 3 or parts[0] != "cut":
+        return 0.0
+    time_parts = parts[-1].split(".")
+    try:
+        if len(time_parts) >= 3:
+            seconds = int(time_parts[0]) * 3600 + int(time_parts[1]) * 60 + int(time_parts[2])
+            if len(time_parts) > 3:
+                seconds += float("0." + "".join(time_parts[3:]))
+            return seconds
+    except ValueError:
+        return 0.0
+    return 0.0
+
+def format_timecode(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+
+def reference_name_for_time(index: int, seconds: float) -> str:
+    return f"cut_{index:04d}_{format_timecode(seconds).replace(':', '.')}.png"
+
+def color_reference_for_source(source_reference: str) -> str:
+    source = resolve(source_reference)
+    try:
+        relative = source.relative_to(ROOT / "intermediate" / "outpainted_references")
+        return rel(ROOT / "intermediate" / "outpainted_references_color" / relative)
+    except ValueError:
+        return rel(source.with_name(source.stem + "_color" + source.suffix))
+
+def delete_color_reference(manifest_text: str, index: int) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    _source_video, _fields, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows):
+        raise IndexError(f"Manifest row {index} is out of range.")
+    target = rows[index].get("color_reference", "")
+    if not target:
+        raise RuntimeError("Manifest row does not have a color_reference path.")
+    path = resolve(target)
+    sig = path.with_suffix(path.suffix + ".sig.json")
+    deleted = []
+    for item in (path, sig):
+        if item.exists() and item.is_file():
+            item.unlink()
+            deleted.append(rel(item))
+    APP.log.append(f"Deleted colour reference for shot {index + 1}: {target}")
+    return {"deleted": ", ".join(deleted), "color_reference": target}
+
+def install_custom_color_reference(manifest_text: str, index: int) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    _source, _fields, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows):
+        raise IndexError("Shot index out of range.")
+
+    selected = browse_path("file", rows[index].get("color_reference", "") or rows[index].get("source_reference", ""))
+    if not selected:
+        return {"selected": "", "color_reference": rows[index].get("color_reference", "")}
+
+    source = resolve(selected)
+    if source.suffix.lower() not in IMAGE_EXTS:
+        raise RuntimeError("Choose a PNG or JPEG image for the custom color reference.")
+    if not source.exists() or not source.is_file():
+        raise FileNotFoundError(source)
+
+    current_target = rows[index].get("color_reference", "")
+    if current_target:
+        target_base = resolve(current_target)
+        target = target_base.with_suffix(source.suffix.lower())
+    elif rows[index].get("source_reference"):
+        target = resolve(color_reference_for_source(rows[index]["source_reference"])).with_suffix(source.suffix.lower())
+    else:
+        target = ROOT / "intermediate" / "outpainted_references_color" / "custom" / f"shot_{index + 1:04d}{source.suffix.lower()}"
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    update_manifest_row(manifest, index, {"color_reference": rel(target)})
+    APP.log.append(f"Installed custom color reference for shot {index + 1}: {rel(target)}")
+    return {"selected": selected, "color_reference": rel(target)}
+
+def extract_reference_frame(manifest_text: str, index: int, seconds: float) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    source_video, _fields, rows = read_manifest_details(manifest)
+    if not source_video:
+        raise RuntimeError("Manifest does not record a source_video, so ARP cannot rescrub this shot.")
+    if index < 0 or index >= len(rows):
+        raise IndexError(f"Manifest row {index} is out of range.")
+    old_reference = rows[index].get("source_reference", "")
+    if old_reference:
+        folder = resolve(old_reference).parent
+    else:
+        source = resolve(source_video)
+        folder = ROOT / "intermediate" / "outpainted_references" / safe_stem(source.name)
+    new_source = folder / reference_name_for_time(index, seconds)
+    ffmpeg = local_tool("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("Run install_windows.bat to install local FFmpeg for shot scrubbing.")
+    new_source.parent.mkdir(parents=True, exist_ok=True)
+    command = [ffmpeg, "-y", "-ss", f"{seconds:.3f}", "-i", str(resolve(source_video)), "-frames:v", "1", "-q:v", "2", str(new_source)]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
+    new_color = color_reference_for_source(rel(new_source))
+    update_manifest_row(manifest, index, {"source_reference": rel(new_source), "color_reference": new_color})
+    APP.log.append(f"Updated shot {index + 1} reference frame to {format_timecode(seconds)}: {rel(new_source)}")
+    return {"source_reference": rel(new_source), "color_reference": new_color}
+
+def preview_reference_frame(manifest_text: str, index: int, seconds: float) -> str:
+    manifest = resolve(manifest_text)
+    source_video, _fields, rows = read_manifest_details(manifest)
+    if not source_video:
+        raise RuntimeError("Manifest does not record a source_video, so ARP cannot preview this shot.")
+    if index < 0 or index >= len(rows):
+        raise IndexError(f"Manifest row {index} is out of range.")
+    source = resolve(source_video)
+    target_dir = PREVIEW_DIR / "shot_scrub" / safe_preview_name(manifest)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"shot_{index:04d}_{int(seconds * 1000):010d}.jpg"
+    if target.exists():
+        return rel(target)
+    ffmpeg = local_tool("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("Run install_windows.bat to install local FFmpeg for shot previews.")
+    command = [ffmpeg, "-y", "-ss", f"{seconds:.3f}", "-i", str(source), "-frames:v", "1", "-q:v", "4", str(target)]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
+    return rel(target)
+
+def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list[str], str]:
+    manifest = resolve(manifest_text)
+    _source_video, _fields, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows):
+        raise IndexError(f"Manifest row {index} is out of range.")
+    row = rows[index]
+    source = row.get("source_reference", "")
+    output = row.get("color_reference", "")
+    if not source or not output:
+        raise RuntimeError("Manifest row must have source_reference and color_reference.")
+    values = APP.settings.get("references", {})
+    config = current_config()
+    workflow = qwen_workflow_for(values, config)
+    if not workflow:
+        raise RuntimeError("No Qwen Image Edit workflow found. Install/configure ComfyUI first.")
+    cmd = [
+        sys.executable,
+        "-u",
+        str(SCRIPTS / "generate_single_reference.py"),
+        "--source-image",
+        source,
+        "--output",
+        output,
+        "--workflow",
+        workflow,
+        "--comfy-url",
+        values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188"),
+        "--comfy-dir",
+        config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
+        "--comfy-output-root",
+        values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
+        "--model-backend",
+        values.get("model_backend", "gguf"),
+        "--gguf-model",
+        values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+        "--prompt",
+        values.get("prompt", REFERENCE_PROMPT),
+        "--prompt-suffix",
+        values.get("prompt_suffix", REFERENCE_PROMPT_SUFFIX),
+        "--load-image-node-id",
+        values.get("load_image_node_id", "auto"),
+        "--save-node-id",
+        values.get("save_node_id", "auto"),
+        "--force",
+    ]
+    if values.get("prompt_node_id"):
+        cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    if row.get("prompt"):
+        cmd.extend(["--add-prompt", row["prompt"]])
+    return cmd, output
+
+def regenerate_reference_image(manifest_text: str, index: int) -> dict[str, str]:
+    cmd, output = reference_regeneration_command(manifest_text, index)
+    APP.log.append("> " + " ".join(cmd))
+    result = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    for line in result.stdout.splitlines():
+        APP.log.append(line)
+    if result.returncode != 0:
+        raise RuntimeError(f"Reference regeneration failed with exit code {result.returncode}.")
+    APP.log.append(f"Regenerated colour reference for shot {index + 1}: {output}")
+    return {"color_reference": output}
+
+
+def merge_manifest_shots(manifest_text: str, index: int) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    source_video, fieldnames, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows) - 1:
+        raise IndexError(f"Shot {index + 1} cannot be merged because there is no following shot.")
+    for key in ("fade_to_next", "crossfade_seconds"):
+        if key not in fieldnames:
+            fieldnames.append(key)
+    rows[index]["end"] = rows[index + 1].get("end", rows[index].get("end", ""))
+    rows[index]["fade_to_next"] = rows[index + 1].get("fade_to_next", "")
+    rows[index]["crossfade_seconds"] = rows[index + 1].get("crossfade_seconds", "")
+    removed = rows.pop(index + 1)
+    write_manifest_details(manifest, source_video, fieldnames, rows)
+    APP.log.append(f"Merged shot {index + 1} with shot {index + 2}; shared reference: {rows[index].get('source_reference', '')}")
+    return {"manifest": rel(manifest), "removed_reference": removed.get("source_reference", ""), "new_end": rows[index].get("end", "")}
+
+def split_manifest_shot(manifest_text: str, index: int, seconds: float | None = None) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    source_video, fieldnames, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows):
+        raise IndexError(f"Manifest row {index} is out of range.")
+
+    for key in ("enabled", "end", "source_reference", "color_reference", "prompt", "fade_to_next", "crossfade_seconds"):
+        if key not in fieldnames:
+            fieldnames.append(key)
+
+    start = parse_time_seconds(rows[index - 1].get("end", "")) if index > 0 else 0.0
+    end = parse_time_seconds(rows[index].get("end", ""))
+    if end <= start:
+        raise RuntimeError(f"Shot {index + 1} cannot be split because its duration is not valid.")
+
+    split_at = (start + end) / 2 if seconds is None else float(seconds)
+    split_at = max(start + 0.001, min(end - 0.001, split_at))
+    if end - start < 0.1:
+        raise RuntimeError(f"Shot {index + 1} is too short to split.")
+
+    first = dict(rows[index])
+    second = dict(rows[index])
+    first["end"] = format_timecode(split_at)
+    first["source_reference"] = ""
+    first["color_reference"] = ""
+    first["fade_to_next"] = "false"
+    first["crossfade_seconds"] = ""
+    second["end"] = rows[index].get("end", "")
+    second["source_reference"] = ""
+    second["color_reference"] = ""
+    rows[index] = first
+    rows.insert(index + 1, second)
+    write_manifest_details(manifest, source_video, fieldnames, rows)
+    APP.log.append(f"Split shot {index + 1} at {format_timecode(split_at)}")
+    return {"manifest": rel(manifest), "split": format_timecode(split_at)}
+
+def update_shot_boundary(manifest_text: str, index: int, edge: str, seconds: float) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    source_video, fieldnames, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows):
+        raise IndexError(f"Manifest row {index} is out of range.")
+    if edge == "start":
+        if index == 0:
+            raise RuntimeError("The first shot must start at 00:00:00.")
+        previous_start = parse_time_seconds(rows[index - 2].get("end", "")) if index > 1 else 0.0
+        current_end = parse_time_seconds(rows[index].get("end", ""))
+        seconds = max(previous_start, min(current_end - 0.001, seconds))
+        rows[index - 1]["end"] = format_timecode(seconds)
+    elif edge == "end":
+        start = parse_time_seconds(rows[index - 1].get("end", "")) if index > 0 else 0.0
+        next_end = parse_time_seconds(rows[index + 1].get("end", "")) if index + 1 < len(rows) else seconds
+        upper = max(start + 0.001, next_end)
+        seconds = max(start + 0.001, min(upper, seconds))
+        rows[index]["end"] = format_timecode(seconds)
+    else:
+        raise RuntimeError("Boundary edge must be start or end.")
+    write_manifest_details(manifest, source_video, fieldnames, rows)
+    APP.log.append(f"Updated shot {index + 1} {edge} boundary to {format_timecode(seconds)}")
+    return {"manifest": rel(manifest), "time": format_timecode(seconds)}
+
+def update_shot_fade(manifest_text: str, index: int, enabled: bool, crossfade_seconds: str) -> dict[str, str]:
+    manifest = resolve(manifest_text)
+    source_video, fieldnames, rows = read_manifest_details(manifest)
+    if index < 0 or index >= len(rows) - 1:
+        raise IndexError(f"Shot {index + 1} does not have a following transition.")
+    for key in ("fade_to_next", "crossfade_seconds"):
+        if key not in fieldnames:
+            fieldnames.append(key)
+    try:
+        seconds = max(0.0, float(crossfade_seconds or 0.0))
+    except ValueError:
+        seconds = 0.0
+    rows[index]["fade_to_next"] = "true" if enabled and seconds > 0 else "false"
+    rows[index]["crossfade_seconds"] = f"{seconds:.3f}".rstrip("0").rstrip(".") if seconds else ""
+    write_manifest_details(manifest, source_video, fieldnames, rows)
+    state = "enabled" if rows[index]["fade_to_next"] == "true" else "disabled"
+    APP.log.append(f"Fade transition after shot {index + 1} {state}; crossfade {rows[index].get('crossfade_seconds') or '0'}s")
+    return {"manifest": rel(manifest), "fade_to_next": rows[index]["fade_to_next"], "crossfade_seconds": rows[index]["crossfade_seconds"]}

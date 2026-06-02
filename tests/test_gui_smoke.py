@@ -6,6 +6,7 @@ import json
 import shutil
 import tempfile
 import threading
+import time
 import urllib.request
 import unittest
 import sys
@@ -561,6 +562,96 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("shots", stage_keys)
         self.assertEqual(app.APP.settings["shots"]["outpainted_video"], "input/example.mp4")
         self.assertIn("input/example.mp4", command)
+
+    def test_new_outpaint_source_does_not_hydrate_empty_manifest_as_repo_root(self) -> None:
+        app.APP.settings["global"].update({"source": "input/new-source.mp4", "expand_outpaint": "true", "colorize": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings.setdefault("outpaint", {}).update({"target_aspect": "16:9", "target_height": "480"})
+
+        with mock.patch.object(server, "newest", return_value=None):
+            app.APP.hydrate_stage_inputs("global")
+
+        self.assertEqual(app.APP.settings["shots"]["outpainted_video"], "")
+        self.assertEqual(app.APP.settings["references"]["manifest"], "")
+        self.assertEqual(app.APP.settings["colour"]["manifest"], "")
+        self.assertEqual(app.APP.settings["recomp"]["manifest"], "")
+        self.assertEqual(app.APP.expected_outputs("shots"), [])
+
+    def test_outpaint_progress_surfaces_active_comfy_chunk_globally(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "outpaint"
+        app.APP.running_stage = "Outpainting"
+        app.APP.run_started_at = time.time() - 120
+        app.APP.log = [
+            "Outpaint chunk 1/3: frames 0-480",
+            "Wrote raw Comfy chunk 1: chunk_0000.mp4",
+            "Outpaint chunk 2/3: frames 472-952",
+            "Sending prompt nodes: {'5076': 'VHS_VideoCombine'}",
+            "Queued ComfyUI prompt: prompt-id",
+        ]
+
+        try:
+            stage_progress = app.APP.estimate_running_progress()
+            global_progress = app.APP.phase_progress()["global"]
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertIn("Chunk 2/3 rendering in ComfyUI (1 done), ETA", stage_progress["label"])
+        self.assertIn("Chunk 2/3 rendering in ComfyUI", global_progress["label"])
+
+    def test_reference_progress_ignores_previous_stage_writes(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "references"
+        app.APP.running_stage = "Reference Generation"
+        app.APP.run_started_at = time.time() - 60
+        app.APP.log = [
+            "Wrote source frame 0000: source.png",
+            "Wrote source frame 0001: source.png",
+            "Wrote manifest: refs.csv",
+            r"> python scripts\qwen_colorize_references.py --manifest refs.csv",
+            "Rows: 11",
+            "Colorize 0000: source.png -> color.png",
+            "Queued ComfyUI prompt: prompt-id",
+            "Wrote color.png",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "1/11 references")
+
+    def test_colour_progress_ignores_previous_process_finished_lines(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "colour"
+        app.APP.running_stage = "Colorization"
+        app.APP.run_started_at = time.time() - 60
+        app.APP.log = [
+            r"> python scripts\qwen_colorize_references.py --manifest refs.csv",
+            "Wrote reference.png",
+            "Process finished with exit code 0.",
+            r"> python scripts\colorize_video.py --manifest refs.csv --method both",
+            "Colorize segment 11/11 with deepexemplar: frames 1343-1440 using ref.png",
+            "Wrote colorized video: deepexemplar.mp4",
+            "Colorize segment 4/11 with colormnet: frames 527-632 using ref.png",
+            "Sending prompt nodes: {'1': 'VHS_LoadVideo'}",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "Colorizing segment 4/11")
 
     def test_blank_project_defaults_outpainting_visible(self) -> None:
         with mock.patch.object(app, "SETTINGS_FILE", Path("missing-settings.json")), mock.patch.object(app, "newest", return_value=None):

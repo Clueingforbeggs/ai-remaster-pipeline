@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from .config import (
+    CONFIG_FILE,
+    OUTPAINT_PROMPT,
+    REFERENCE_PROMPT,
+    REFERENCE_PROMPT_SUFFIX,
+    ROOT,
+    SETTINGS_FILE,
+    VIDEO_EXTS,
+    current_config,
+)
+from .models import STAGES
+from .paths import newest, rel, resolve
+
+
+def app_version() -> str:
+    version_file = ROOT / "VERSION"
+    base = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else "0.0.0"
+    try:
+        commit = subprocess.run(
+            ["git", "-c", f"safe.directory={ROOT.as_posix()}", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except Exception:
+        commit = ""
+    return "v" + base.lstrip("v") + (f"-{commit}" if commit else "")
+
+def default_qwen_workflow(config: dict[str, str]) -> str:
+    comfy_dir = Path(config.get("comfy_dir", ROOT / "tools" / "comfyui"))
+    search_dirs = [
+        ROOT / "workflows" / "qwen_image_edit",
+        ROOT / "blueprints",
+        comfy_dir / "blueprints",
+        comfy_dir / "user" / "default" / "workflows",
+    ]
+    all_matches: list[Path] = []
+
+    def workflow_rank(path: Path) -> tuple[int, str]:
+        name = path.name.lower()
+        if "2509" in name and ("image edit" in name or "image_edit" in name):
+            return (0, name)
+        if "image edit" in name or "image_edit" in name:
+            return (1, name)
+        if "edit" in name:
+            return (2, name)
+        return (3, name)
+
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        matches = sorted(
+            path
+            for path in directory.glob("*.json")
+            if "qwen" in path.name.lower() and path.is_file()
+        )
+        preferred = [path for path in matches if workflow_rank(path)[0] < 3]
+        if preferred:
+            return rel(sorted(preferred, key=workflow_rank)[0])
+        all_matches.extend(matches)
+    if all_matches:
+        return rel(sorted(all_matches)[0])
+    return ""
+
+def qwen_workflow_for(values: dict[str, str], config: dict[str, str]) -> str:
+    configured = values.get("workflow", "")
+    if configured and resolve(configured).exists():
+        return configured
+    return default_qwen_workflow(config)
+
+def load_settings() -> dict[str, dict[str, str]]:
+    defaults = {stage.key: {key: default for key, _label, _kind, default in stage.fields} for stage in STAGES}
+    defaults["global"] = {"source": "", "expand_outpaint": "true", "colorize": "true", "section_start": "0", "section_end": "", "last_browse_dir": ""}
+    app_module = sys.modules.get("ai_remaster_gui.app")
+    settings_file = getattr(app_module, "SETTINGS_FILE", SETTINGS_FILE)
+    newest_fn = getattr(app_module, "newest", newest) if app_module else newest
+    if settings_file.exists():
+        try:
+            stored = json.loads(settings_file.read_text(encoding="utf-8"))
+            for key, values in stored.items():
+                if key in defaults and isinstance(values, dict):
+                    defaults[key].update({k: str(v) for k, v in values.items()})
+        except json.JSONDecodeError:
+            pass
+    source = newest_fn(ROOT / "input", VIDEO_EXTS)
+    if source and not defaults["global"].get("source"):
+        defaults["global"]["source"] = rel(source)
+    if not defaults["global"].get("source"):
+        defaults["global"]["expand_outpaint"] = "true"
+    if "colormnet" in defaults["recomp"].get("colorized_video", "").lower():
+        defaults["recomp"]["colorized_video"] = ""
+    old_outpaint_prompts = {
+        "Outpaint the black margins with a natural continuation of the black-and-white film frame. Replace all black padding/bars with coherent background, clothing, bodies, props, and set detail that matches the original centre footage. Preserve camera motion, composition, lighting, film grain, and monochrome style. Do not colorize.",
+    }
+    if defaults["outpaint"].get("prompt", "") in old_outpaint_prompts:
+        defaults["outpaint"]["prompt"] = OUTPAINT_PROMPT
+    defaults["colour"].setdefault("method", "deepexemplar")
+    defaults["recomp"].setdefault("colorization_method", "deepexemplar")
+    bundled_output = rel(ROOT / "tools" / "comfyui" / "output")
+    config = current_config()
+    if not defaults["references"].get("comfy_output_root") or (CONFIG_FILE.exists() and defaults["references"].get("comfy_output_root") == bundled_output):
+        defaults["references"]["comfy_output_root"] = rel(Path(config["comfy_dir"]) / "output")
+    if not defaults["references"].get("comfy_url"):
+        defaults["references"]["comfy_url"] = config["comfy_url"]
+    if not defaults["references"].get("workflow"):
+        defaults["references"]["workflow"] = default_qwen_workflow(config)
+    elif "blueprints" in defaults["references"].get("workflow", "").lower() and "qwen" in defaults["references"].get("workflow", "").lower():
+        migrated_workflow = default_qwen_workflow(config)
+        if migrated_workflow:
+            defaults["references"]["workflow"] = migrated_workflow
+    if not defaults["references"].get("load_image_node_id") or defaults["references"].get("load_image_node_id") == "1":
+        defaults["references"]["load_image_node_id"] = "auto"
+    defaults["references"].setdefault("prompt_node_id", "")
+    if not defaults["references"].get("save_node_id") or defaults["references"].get("save_node_id") == "9":
+        defaults["references"]["save_node_id"] = "auto"
+    defaults["references"].setdefault("model_backend", "gguf")
+    defaults["references"].setdefault("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")
+    old_reference_prompts = {
+        "",
+        "Colorize this image.",
+        "Colorize this image. Preserve the drawing and composition. Use clean modern cartoon colours, not sepia. Do not add text or new objects.",
+        "Colorize this image. Preserve the original image. Do not add text, captions, logos, labels, signs, subtitles, or new objects.",
+        "Colorize this image as a clean modern full-colour cartoon production still. Preserve the exact drawing, characters, line art, camera angle, and composition. Use natural vivid colours, not sepia or a single tint. Do not add text or new objects.",
+        "Transform this black-and-white frame into a clean modern full-colour animation production still. Keep the exact drawing, characters, camera angle, line art, shapes, and composition. Use vivid but tasteful contemporary cartoon colours as if the same scene had been made today with modern colour cameras and animation paint. Do not use sepia, monochrome tinting, hand-tinted antique colours, washed-out beige, or archival restoration grading. Do not add text, captions, logos, labels, signs, subtitles, or new objects.",
+    }
+    old_reference_suffixes = {
+        "",
+        "Preserve composition, lighting, identity, and detail. Do not add text or new objects.",
+        "Natural period color, preserve lighting and composition.",
+        "Modern clean restoration, natural period color, preserve composition and text.",
+        "Keep black ink deep and whites clean. Give sky, water, wood, metal, fabric, and props distinct believable colours.",
+        "White gloves and faces should stay clean and bright, black ink areas should stay deep black, wood, metal, sky, water, fabric, and background props should receive distinct natural colours. Preserve original lighting, shadows, outlines, and film grain while making the colour read as genuine full colour, not a tint.",
+    }
+    if defaults["references"].get("prompt", "") in old_reference_prompts or "cartoon" in defaults["references"].get("prompt", "").lower():
+        defaults["references"]["prompt"] = REFERENCE_PROMPT
+    if defaults["references"].get("prompt_suffix", "") in old_reference_suffixes or "props" in defaults["references"].get("prompt_suffix", "").lower():
+        defaults["references"]["prompt_suffix"] = REFERENCE_PROMPT_SUFFIX
+    return defaults
+
+
+APP_VERSION = app_version()
