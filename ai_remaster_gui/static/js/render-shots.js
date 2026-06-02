@@ -222,11 +222,15 @@ function boundaryFrameCard({ manifest, row, idx }, edge) {
   const max = isStart ? row.end : Number(row.end) + 1;
   const disabled = isStart && idx === 0 ? 'disabled' : '';
   const label = isStart ? 'Start' : 'End';
+  const fps = Math.max(1, Number(row.end_frame) - Number(row.start_frame) + 1) / Math.max(0.001, Number(row.end) - Number(row.start));
+  const imgId = `shotBoundaryImg_${edge}_${idx}`;
+  const labelId = `shotBoundaryLabel_${edge}_${idx}`;
+  const previewOffset = isStart ? 0 : -(1 / fps);
 
   return `
     <div>
-      <label>${label} frame ${frame ?? ''}</label>
-      ${preview ? `<img src="${media(preview)}" alt="">` : missingImage('Image not present')}
+      <label id="${labelId}">${label} frame ${frame ?? ''}</label>
+      ${preview ? `<img id="${imgId}" src="${media(preview)}&t=${Date.now()}" alt="">` : missingImage('Image not present')}
       <input
         type="range"
         min="${min}"
@@ -234,6 +238,10 @@ function boundaryFrameCard({ manifest, row, idx }, edge) {
         step="0.041"
         value="${value}"
         ${disabled}
+        data-edge="${edge}"
+        data-fps="${fps}"
+        data-preview-offset="${previewOffset}"
+        oninput="updateShotBoundaryPreview('${esc(manifest)}',${idx},this.value,'${imgId}','${labelId}',this.dataset)"
         onchange="setShotBoundary('${esc(manifest)}',${idx},'${edge}',this.value)"
       >
       <div class="shot-tools">
@@ -335,6 +343,15 @@ function refreshShotRows(mode, indices) {
   if (mode === 'references') wireReferenceTimeControls();
 }
 
+function updateReferencesDynamicStatus() {
+  const sp = stageProgress('references');
+  const progressEl = document.querySelector('.shot-page > section:first-child .phase-progress');
+  if (progressEl) progressEl.outerHTML = progressHtml(sp.percent, sp.label);
+
+  const rows = ((state.shot_views && state.shot_views.references) || []).map(row => row.index);
+  refreshShotRows('references', rows);
+}
+
 function referenceTimeControl(manifest, row, idx, slider, label, img) {
   return `
     <label>Reference time</label>
@@ -366,6 +383,8 @@ function referencePromptTools({ manifest, row, idx }) {
     && state.running_reference.index === idx
     && state.running_reference.manifest === manifest;
   const rp = stageProgress('references');
+  const hasReference = !!(row.color_reference && row.color_reference_mtime);
+  const buttonLabel = hasReference ? 'Regenerate Reference' : 'Generate Reference';
 
   return `
     <label>Shot prompt</label>
@@ -375,7 +394,7 @@ function referencePromptTools({ manifest, row, idx }) {
         Use Custom Image
       </button>
       <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx})" ${state.running ? 'disabled' : ''}>
-        ${regenerating ? 'Regenerating...' : 'Regenerate Reference'}
+        ${regenerating ? 'Regenerating...' : buttonLabel}
       </button>
       ${regenerating ? '<span class="spinner" aria-label="In progress"></span>' : ''}
     </div>

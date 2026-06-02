@@ -24,6 +24,14 @@ async function scrubShot(manifest, index, time) {
   lastRenderSignature = renderSignature();
 }
 
+async function refreshReferenceRowFromState(nextState, index) {
+  state = nextState || await api(stateUrl());
+  pruneSelected();
+  refreshShotRows('references', [index]);
+  updateRunLogs();
+  lastRenderSignature = renderSignature();
+}
+
 async function saveShotPrompt(manifest, index, prompt) {
   const result = await postJson('/api/shot-prompt', { manifest, index, prompt });
   if (!result.ok) return alert(result.error || 'Could not save prompt');
@@ -200,12 +208,32 @@ function updateShotPreview(manifest, index, time, imgId, labelId) {
   }, 180);
 }
 
+function updateShotBoundaryPreview(manifest, index, time, imgId, labelId, dataset) {
+  const label = document.getElementById(labelId);
+  const edge = dataset && dataset.edge === 'end' ? 'End' : 'Start';
+  const fps = Math.max(1, Number((dataset && dataset.fps) || 24));
+  const frame = Math.max(0, Math.round(Number(time || 0) * fps) - (edge === 'End' ? 1 : 0));
+  if (label) label.textContent = `${edge} frame ${frame}`;
+
+  clearTimeout(previewTimers[imgId]);
+  previewTimers[imgId] = setTimeout(async () => {
+    const previewTime = Math.max(0, Number(time || 0) + Number((dataset && dataset.previewOffset) || 0));
+    const query = '?manifest=' + encodeURIComponent(manifest)
+      + '&index=' + index
+      + '&time=' + encodeURIComponent(previewTime);
+    const result = await api('/api/shot-preview' + query);
+    const img = document.getElementById(imgId);
+    if (result.ok && result.path && img) img.src = media(result.path) + '&t=' + Date.now();
+  }, 120);
+}
+
 async function regenerateReference(manifest, index) {
   const snap = captureScrollState();
   const result = await postJson('/api/reference-regenerate', { manifest, index });
   if (!result.ok) return alert(result.error || 'Could not regenerate reference');
 
-  await redrawWithState(result.state, snap);
+  await refreshReferenceRowFromState(result.state, index);
+  restoreScrollState(snap);
   setTimeout(refresh, 1000);
 }
 
@@ -216,7 +244,8 @@ async function deleteReference(manifest, index) {
   const result = await postJson('/api/reference-delete', { manifest, index });
   if (!result.ok) return alert(result.error || 'Could not delete reference');
 
-  await redrawWithState(result.state, snap);
+  await refreshReferenceRowFromState(result.state, index);
+  restoreScrollState(snap);
 }
 
 async function chooseCustomReference(manifest, index) {
@@ -225,7 +254,8 @@ async function chooseCustomReference(manifest, index) {
   if (!result.ok) return alert(result.error || 'Could not install custom reference');
   if (!result.selected) return;
 
-  await redrawWithState(result.state, snap);
+  await refreshReferenceRowFromState(result.state, index);
+  restoreScrollState(snap);
 }
 
 async function exportMedia(path) {

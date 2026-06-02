@@ -60,6 +60,14 @@ async function refresh(force = false) {
     return;
   }
 
+  if (!force && !editing && active === 'references' && document.getElementById('app')?.children.length) {
+    updateReferencesDynamicStatus();
+    updateRunLogs();
+    lastRenderSignature = sig;
+    lastOutpaintVisualSignature = currentOutpaintVisualSignature;
+    return;
+  }
+
   if (!force && (editing || (shouldPreserveInteractiveDom(mediaActive) && !outpaintVisualChanged) || sig === lastRenderSignature)) {
     if (active === 'global') updateOverviewDynamicStatus();
     updateOutpaintGuidePreviews();
