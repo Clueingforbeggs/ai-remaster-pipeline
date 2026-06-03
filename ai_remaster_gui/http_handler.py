@@ -352,6 +352,7 @@ class Handler(BaseHTTPRequestHandler):
                 selected = browse_path(str(data.get("kind", "file")), str(data.get("current", "")))
                 self.send_json({"ok": True, "path": selected})
             except Exception as exc:
+                APP.log.append(f"Browse failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/browse-global-source":
             try:
@@ -360,6 +361,7 @@ class Handler(BaseHTTPRequestHandler):
                     APP.update_settings("global", {"source": selected})
                 self.send_json({"ok": True, "path": selected, "state": APP.state("global")})
             except Exception as exc:
+                APP.log.append(f"Browse failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/overview-clear":
             APP.clear_overview()

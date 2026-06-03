@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import os
 from pathlib import Path
 
 from .config import IMAGE_EXTS, ROOT, VIDEO_EXTS
@@ -74,12 +75,34 @@ def browse_path_windows(kind: str, initial: Path) -> str:
     initial_dir = initial if initial.is_dir() else initial.parent
     initial_text = str(initial_dir).replace("'", "''")
     initial_file = "" if initial.is_dir() else initial.name.replace("'", "''")
+    owner_script = """
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.WindowState = 'Minimized'
+$owner.Add_Shown({ $owner.Hide() })
+$owner.Show()
+$owner.Activate()
+"""
+    show_script = """
+try {
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.FileName) }
+} finally {
+    $owner.Dispose()
+}
+"""
     if kind == "folder":
         script = f"""
-Add-Type -AssemblyName System.Windows.Forms
+{owner_script}
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 $dialog.SelectedPath = '{initial_text}'
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($dialog.SelectedPath) }}
+try {{
+    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($dialog.SelectedPath) }}
+}} finally {{
+    $owner.Dispose()
+}}
 """
     elif kind in {"save", "save_image", "project_save"}:
         filter_text = (
@@ -90,12 +113,12 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Consol
             else "Video files (*.mp4;*.mov;*.mkv;*.webm)|*.mp4;*.mov;*.mkv;*.webm|All files (*.*)|*.*"
         )
         script = f"""
-Add-Type -AssemblyName System.Windows.Forms
+{owner_script}
 $dialog = New-Object System.Windows.Forms.SaveFileDialog
 $dialog.InitialDirectory = '{initial_text}'
 $dialog.FileName = '{initial_file}'
 $dialog.Filter = '{filter_text}'
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($dialog.FileName) }}
+{show_script}
 """
     else:
         filter_text = (
@@ -104,12 +127,14 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Consol
             else "Media/workflow files (*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.png;*.jpg;*.jpeg;*.json;*.csv)|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.png;*.jpg;*.jpeg;*.json;*.csv|All files (*.*)|*.*"
         )
         script = f"""
-Add-Type -AssemblyName System.Windows.Forms
+{owner_script}
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.InitialDirectory = '{initial_text}'
 $dialog.Filter = '{filter_text}'
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::Out.Write($dialog.FileName) }}
+{show_script}
 """
+    if "APP" in globals():
+        APP.log.append(f"Opening Windows browse dialog for {kind}: {initial_dir}")
     result = subprocess.run(
         ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script],
         check=False,
