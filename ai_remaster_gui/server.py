@@ -127,6 +127,7 @@ from .outpaint_guides import (
 )
 from .cache import cache_state, delete_cache_category, delete_cache_file, human_size, bind_context as bind_cache_context
 from .runtime_settings import APP_VERSION, default_qwen_workflow, load_settings, qwen_workflow_for
+from .system_status import system_status
 from .media import (
     aspect_preview,
     aspect_preview_at,
@@ -444,6 +445,7 @@ class PipelineApp:
                 "outpaint_chunks": outpaint_chunks,
                 "shot_views": shots,
                 "cache": cache,
+                "system_status": system_status(),
                 "running": running,
                 "running_stage": self.running_stage,
                 "running_reference": {

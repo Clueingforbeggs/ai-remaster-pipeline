@@ -37,6 +37,7 @@ async function refresh(force = false) {
   );
   const version = document.getElementById('version');
   if (version) version.textContent = state.version || '';
+  updateSystemStatus();
 
   const sig = renderSignature();
   const currentOutpaintVisualSignature = outpaintVisualSignature();
@@ -109,6 +110,40 @@ function renderSignature() {
     running_stage: state.running_stage,
     running_reference: state.running_reference,
   });
+}
+
+function updateSystemStatus() {
+  const el = document.getElementById('systemStatus');
+  if (!el) return;
+  const status = (state && state.system_status) || {};
+  const cuda = status.cuda || {};
+  const ram = status.ram || {};
+  const vram = status.vram || {};
+  el.innerHTML = [
+    statusBadge('CUDA', cuda.available ? 'Yes' : 'No', cuda.available ? 'ok' : 'bad', statusDetail(cuda)),
+    memoryBadge(ram),
+    memoryBadge(vram),
+  ].join('');
+}
+
+function statusBadge(name, value, tone, title) {
+  return `<span class="status-badge ${tone}" title="${esc(title || '')}"><span>${esc(name)}</span><strong>${esc(value)}</strong></span>`;
+}
+
+function memoryBadge(item) {
+  const text = item && item.label ? String(item.label) : 'Unknown';
+  const match = text.match(/^(\S+)\s+(.+)$/);
+  const percent = Number(item && item.percent);
+  const tone = Number.isFinite(percent) ? (percent >= 90 ? 'bad' : percent >= 75 ? 'warn' : 'ok') : 'unknown';
+  return statusBadge(match ? match[1] : 'Memory', match ? match[2] : text, tone, statusDetail(item || {}));
+}
+
+function statusDetail(item) {
+  const details = [];
+  if (item.detail) details.push(String(item.detail));
+  if (item.torch) details.push('torch ' + item.torch);
+  if (item.cuda) details.push('CUDA ' + item.cuda);
+  return details.join(' | ');
 }
 
 function updateOverviewDynamicStatus() {
