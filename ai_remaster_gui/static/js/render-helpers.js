@@ -78,6 +78,8 @@ function selectFieldHtml(key, label, kind, value) {
 }
 
 function selectOptionLabel(key, option) {
+  if (key === 'method' && option === 'qwen') return 'Qwen 2511 (local)';
+  if (key === 'method' && option === 'openai') return 'OpenAI API (cloud)';
   if (key === 'target_height' && option === 'source') {
     const resolution = (state.source_info && state.source_info.resolution) || '';
     const match = String(resolution).match(/x(\d+)/i);

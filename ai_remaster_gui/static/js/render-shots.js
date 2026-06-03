@@ -56,6 +56,7 @@ function drawShotStage({ key, heading, runLabel, outputLimit, afterRender }) {
         ${key === 'colour' ? colorizationMethodWarning(s) : ''}
         ${key === 'shots' ? shotDetectionInputStatus(s) : ''}
         ${visibleFields.map(f => fieldHtml(st, f)).join('')}
+        ${key === 'references' ? referenceGenerationOptionsHtml(s) : ''}
         ${shotOutputList(expected, outputLimit)}
         ${stageCheckboxes(s)}
         <div class="actions">
@@ -79,7 +80,20 @@ function drawShotStage({ key, heading, runLabel, outputLimit, afterRender }) {
 
 function shotStageVisibleFields(st) {
   if (st.key === 'shots') return st.fields.filter(field => field[0] !== 'outpainted_video');
+  if (st.key === 'references') return st.fields.filter(field => field[0] !== 'manifest');
   return st.fields;
+}
+
+function referenceGenerationOptionsHtml(s) {
+  if ((s.method || 'qwen') !== 'openai') return '';
+  return `
+    <div class="checks">
+      <label>
+        <input data-field="openai_send_references" type="checkbox" ${s.openai_send_references === 'true' ? 'checked' : ''}>
+        Also send (3) previous images as references
+      </label>
+    </div>
+  `;
 }
 
 function shotDetectionInputStatus(s) {
@@ -302,7 +316,7 @@ function referenceCard(context) {
       ${shotSummary(context, referenceTimeControl(manifest, row, idx, slider, label, img))}
       <div>
         <label>B&W screenshot</label>
-        ${sourceReady ? `<div class="thumb-wrap"><img id="${img}" src="${sourceUrl}" alt=""><button class="icon-button" type="button" title="Save B&W screenshot" onclick="exportMedia('${esc(row.source_reference)}')">&#128190;</button></div>` : missingImage('Image not present')}
+        ${sourceReady ? `<div class="thumb-wrap"><img id="${img}" src="${sourceUrl}" alt="" onclick="openImageModal(this.src,${jsArg('B&W screenshot')})"><button class="icon-button" type="button" title="Save B&W screenshot" onclick="exportMedia('${esc(row.source_reference)}')">&#128190;</button></div>` : missingImage('Image not present')}
       </div>
       <div>
         <label>Color reference</label>
@@ -372,7 +386,7 @@ function referenceTimeControl(manifest, row, idx, slider, label, img) {
 function colorReferenceThumb(manifest, idx, colorUrl) {
   return `
     <div class="thumb-wrap">
-      <img src="${colorUrl}" alt="">
+      <img src="${colorUrl}" alt="" onclick="openImageModal(this.src,${jsArg('Color reference')})">
       <button class="icon-button" type="button" title="Delete color reference" onclick="deleteReference('${esc(manifest)}',${idx})">&#128465;</button>
     </div>
   `;
@@ -391,11 +405,8 @@ function referencePromptTools({ manifest, row, idx }) {
       <button type="button" onclick="chooseCustomReference('${esc(manifest)}',${idx})">
         Use Custom Image
       </button>
-      <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx},'qwen')" ${state.running ? 'disabled' : ''}>
-        ${regenerating ? 'Generating...' : 'Generate with Qwen 2511 (local)'}
-      </button>
-      <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx},'openai')" ${state.running ? 'disabled' : ''}>
-        ${regenerating ? 'Generating...' : 'Generate with OpenAI (cloud)'}
+      <button type="button" onclick="regenerateReference('${esc(manifest)}',${idx})" ${state.running ? 'disabled' : ''}>
+        ${regenerating ? 'Generating...' : 'Generate Reference'}
       </button>
       ${regenerating ? '<span class="spinner" aria-label="In progress"></span>' : ''}
     </div>

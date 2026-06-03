@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import comfy_api  # noqa: E402
 import colorize_video  # noqa: E402
 import generate_single_reference  # noqa: E402
+import openai_generate_reference  # noqa: E402
 import outpaint_video  # noqa: E402
 import prepare_outpaint_input  # noqa: E402
 import qwen_colorize_references  # noqa: E402
@@ -135,6 +136,18 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(server.default_qwen_workflow({}), app.rel(qwen))
         self.assertEqual(server.qwen_workflow_for({"workflow": "D:/missing/blueprints/Qwen Custom.json"}, {}), app.rel(qwen))
+        self.assertEqual(
+            server.qwen_workflow_for(
+                {
+                    "workflow": (
+                        "D:/ComfyUI/venv/Lib/site-packages/"
+                        "comfyui_workflow_templates_media_image/templates/image_qwen_image_edit_2511.json"
+                    )
+                },
+                {},
+            ),
+            app.rel(qwen),
+        )
 
     def test_required_custom_nodes_are_bundled(self) -> None:
         required = {
@@ -664,8 +677,45 @@ class GuiSmokeTests(unittest.TestCase):
             command, output = app.openai_reference_regeneration_command(str(manifest), 0)
 
             self.assertIn("openai_generate_reference.py", " ".join(command))
+            self.assertIn("--manifest", command)
+            self.assertIn("--row-index", command)
             self.assertEqual(command[command.index("--model") + 1], "gpt-image-1")
             self.assertEqual(output, app.rel(color))
+
+    def test_openai_manifest_command_can_send_nearby_reference_images(self) -> None:
+        app.APP.settings["references"].update(
+            {
+                "manifest": "manifests/references/demo.csv",
+                "method": "openai",
+                "openai_api_key": "sk-test",
+                "openai_image_model": "gpt-image-2",
+                "openai_send_references": "true",
+            }
+        )
+
+        command = app.APP.command_for("references")
+
+        self.assertIn("openai_generate_reference.py", " ".join(command))
+        self.assertIn("--reference-count", command)
+        self.assertNotIn("qwen_colorize_references.py", " ".join(command))
+
+    def test_openai_nearby_references_prefer_previous_then_later(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            refs = []
+            rows = []
+            for index in range(5):
+                color = folder / f"color_{index}.png"
+                if index in {0, 2, 3, 4}:
+                    color.write_bytes(b"ref")
+                refs.append(color)
+                rows.append({"color_reference": app.rel(color)})
+
+            chosen = openai_generate_reference.nearby_reference_images(rows, 1, 3)
+            early = openai_generate_reference.nearby_reference_images(rows, 0, 3)
+
+        self.assertEqual(chosen, [refs[0], refs[2], refs[3]])
+        self.assertEqual(early, [refs[2], refs[3], refs[4]])
 
     def test_project_save_suggestion_uses_last_browse_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

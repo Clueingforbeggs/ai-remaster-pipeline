@@ -65,6 +65,7 @@ STAGES = (
         "Colorize extracted stills through a Qwen Image Edit ComfyUI workflow.",
         ("intermediate/outpainted_references", "intermediate/outpainted_references_color", "manifests/references"),
         (
+            ("method", "Method", "select:qwen|openai", "qwen"),
             ("manifest", "Manifest", "file", ""),
             ("prompt", "Prompt", "text", REFERENCE_PROMPT),
             ("prompt_suffix", "Prompt suffix", "text", REFERENCE_PROMPT_SUFFIX),

@@ -227,7 +227,8 @@ function updateShotBoundaryPreview(manifest, index, time, imgId, labelId, datase
   }, 120);
 }
 
-async function regenerateReference(manifest, index, provider = 'qwen') {
+async function regenerateReference(manifest, index) {
+  const provider = settings('references').method || 'qwen';
   if (provider === 'openai' && !((settings('references').openai_api_key || '').trim())) {
     alert('Add your OpenAI API key in Settings before generating with OpenAI.');
     active = 'settings';
@@ -236,7 +237,7 @@ async function regenerateReference(manifest, index, provider = 'qwen') {
     return;
   }
   const snap = captureScrollState();
-  const result = await postJson('/api/reference-regenerate', { manifest, index, provider });
+  const result = await postJson('/api/reference-regenerate', { manifest, index });
   if (!result.ok) return alert(result.error || 'Could not regenerate reference');
 
   await refreshReferenceRowFromState(result.state, index);
@@ -613,6 +614,13 @@ async function confirmOverwrite(key) {
 async function runStage(key) {
   if (key === 'recomp') releaseFinalOutputVideos();
   await saveStage(key);
+  if (key === 'references' && (settings('references').method || 'qwen') === 'openai' && !((settings('references').openai_api_key || '').trim())) {
+    alert('Add your OpenAI API key in Settings before running OpenAI Reference Generation.');
+    active = 'settings';
+    drawTabs();
+    draw();
+    return;
+  }
   if (!(await confirmOverwrite(key))) return;
 
   const result = await postJson('/api/run', { stage: key });

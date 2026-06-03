@@ -764,17 +764,26 @@ class PipelineApp:
             ref_w, ref_h = outpaint_work_size_for_source(source_text, aspect, height_text)
             add(["--frame-width", str(ref_w), "--frame-height", str(ref_h)])
         elif stage_key == "references":
-            cmd.append(str(SCRIPTS / "qwen_colorize_references.py"))
-            workflow = qwen_workflow_for(values, config)
-            comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
-            comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
-            comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
-            add(["--manifest", values.get("manifest", ""), "--workflow", workflow, "--comfy-url", comfy_url])
-            add(["--comfy-dir", comfy_dir, "--comfy-output-root", comfy_output])
-            add(["--model-backend", values.get("model_backend", "gguf"), "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")])
-            add(["--prompt", values.get("prompt", ""), "--prompt-suffix", values.get("prompt_suffix", ""), "--load-image-node-id", values.get("load_image_node_id", "auto"), "--save-node-id", values.get("save_node_id", "auto")])
-            if values.get("prompt_node_id"):
-                add(["--prompt-node-id", values["prompt_node_id"]])
+            if values.get("method", "qwen") == "openai":
+                cmd.append(str(SCRIPTS / "openai_generate_reference.py"))
+                add(["--manifest", values.get("manifest", ""), "--api-key", values.get("openai_api_key", "")])
+                add(["--model", values.get("openai_image_model", "gpt-image-2") or "gpt-image-2"])
+                add(["--prompt", values.get("prompt", ""), "--prompt-suffix", values.get("prompt_suffix", "")])
+                add(["--size", values.get("openai_image_size", "auto"), "--quality", values.get("openai_image_quality", "auto")])
+                if values.get("openai_send_references", "false") == "true":
+                    add(["--reference-count", "3"])
+            else:
+                cmd.append(str(SCRIPTS / "qwen_colorize_references.py"))
+                workflow = qwen_workflow_for(values, config)
+                comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
+                comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
+                comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
+                add(["--manifest", values.get("manifest", ""), "--workflow", workflow, "--comfy-url", comfy_url])
+                add(["--comfy-dir", comfy_dir, "--comfy-output-root", comfy_output])
+                add(["--model-backend", values.get("model_backend", "gguf"), "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")])
+                add(["--prompt", values.get("prompt", ""), "--prompt-suffix", values.get("prompt_suffix", ""), "--load-image-node-id", values.get("load_image_node_id", "auto"), "--save-node-id", values.get("save_node_id", "auto")])
+                if values.get("prompt_node_id"):
+                    add(["--prompt-node-id", values["prompt_node_id"]])
             if values.get("limit"):
                 add(["--limit", values["limit"]])
         elif stage_key == "colour":
@@ -831,11 +840,14 @@ class PipelineApp:
             missing = ["source material on the Global tab"]
         if missing:
             return False, "Missing settings: " + ", ".join(missing)
+        if stage_key == "references" and values.get("method", "qwen") == "openai" and not values.get("openai_api_key", "").strip():
+            return False, "Add your OpenAI API key in Settings before running OpenAI Reference Generation."
         try:
             self.ensure_pipeline_source()
         except Exception as exc:
             return False, f"Could not prepare selected source section: {exc}"
-        if stage_key in {"outpaint", "references", "colour"}:
+        needs_comfy = stage_key in {"outpaint", "colour"} or (stage_key == "references" and values.get("method", "qwen") != "openai")
+        if needs_comfy:
             ok, message = ensure_comfy_available_for_stage(stage.title)
             if not ok:
                 return False, message
@@ -846,7 +858,7 @@ class PipelineApp:
             self.running_stage_key = stage.key
             self.run_started_at = time.time()
             cmd = self.command_for(stage_key)
-            self.log.append("> " + " ".join(cmd))
+            self.log.append("> " + redact_command_for_log(cmd))
             kwargs: dict = {"cwd": ROOT, "text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -885,7 +897,7 @@ class PipelineApp:
         return True, f"Started outpaint chunk {index + 1}"
 
     def run_reference_regeneration(self, manifest_text: str, index: int, provider: str = "qwen") -> tuple[bool, str]:
-        provider = "openai" if provider == "openai" else "qwen"
+        provider = "openai" if (provider == "openai" or self.settings.get("references", {}).get("method") == "openai") else "qwen"
         if provider == "qwen":
             ok, message = ensure_comfy_available_for_stage("Reference Generation")
             if not ok:

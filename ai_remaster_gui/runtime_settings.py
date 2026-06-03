@@ -70,11 +70,38 @@ def default_qwen_workflow(config: dict[str, str]) -> str:
         return rel(sorted(all_matches)[0])
     return ""
 
+def should_migrate_qwen_workflow(workflow: str) -> bool:
+    if not workflow:
+        return True
+    resolved = resolve(workflow)
+    try:
+        resolved.relative_to(ROOT / "workflows" / "qwen_image_edit")
+        return False
+    except ValueError:
+        pass
+    workflow_lower = workflow.lower()
+    name = resolved.name.lower()
+    return (
+        "qwen" in workflow_lower
+        and ("2511" in workflow_lower or "image edit" in workflow_lower or "image_edit" in workflow_lower)
+        and (
+            "blueprints" in workflow_lower
+            or "workflow_templates" in workflow_lower
+            or "workflows" in workflow_lower
+            or "templates" in workflow_lower
+            or "image edit" in name
+            or "image_edit" in name
+        )
+    )
+
 def qwen_workflow_for(values: dict[str, str], config: dict[str, str]) -> str:
     configured = values.get("workflow", "")
+    default_workflow = default_qwen_workflow(config)
+    if default_workflow and should_migrate_qwen_workflow(configured):
+        return default_workflow
     if configured and resolve(configured).exists():
         return configured
-    return default_qwen_workflow(config)
+    return default_workflow
 
 def load_settings() -> dict[str, dict[str, str]]:
     defaults = {stage.key: {key: default for key, _label, _kind, default in stage.fields} for stage in STAGES}
@@ -110,9 +137,7 @@ def load_settings() -> dict[str, dict[str, str]]:
         defaults["references"]["comfy_output_root"] = rel(Path(config["comfy_dir"]) / "output")
     if not defaults["references"].get("comfy_url"):
         defaults["references"]["comfy_url"] = config["comfy_url"]
-    if not defaults["references"].get("workflow"):
-        defaults["references"]["workflow"] = default_qwen_workflow(config)
-    elif "blueprints" in defaults["references"].get("workflow", "").lower() and "qwen" in defaults["references"].get("workflow", "").lower():
+    if should_migrate_qwen_workflow(defaults["references"].get("workflow", "")):
         migrated_workflow = default_qwen_workflow(config)
         if migrated_workflow:
             defaults["references"]["workflow"] = migrated_workflow
@@ -123,10 +148,12 @@ def load_settings() -> dict[str, dict[str, str]]:
         defaults["references"]["save_node_id"] = "auto"
     defaults["references"].setdefault("model_backend", "gguf")
     defaults["references"].setdefault("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")
+    defaults["references"].setdefault("method", "qwen")
     defaults["references"].setdefault("openai_api_key", "")
     defaults["references"].setdefault("openai_image_model", "gpt-image-2")
     defaults["references"].setdefault("openai_image_size", "auto")
     defaults["references"].setdefault("openai_image_quality", "auto")
+    defaults["references"].setdefault("openai_send_references", "false")
     old_reference_prompts = {
         "",
         "Colorize this image.",

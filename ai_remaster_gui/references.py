@@ -331,7 +331,7 @@ def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list
     return cmd, output
 
 def openai_reference_regeneration_command(manifest_text: str, index: int) -> tuple[list[str], str]:
-    _manifest, row, source, output = reference_row_io(manifest_text, index)
+    manifest, _row, _source, output = reference_row_io(manifest_text, index)
     values = APP.settings.get("references", {})
     token = values.get("openai_api_key", "").strip()
     if not token:
@@ -340,10 +340,10 @@ def openai_reference_regeneration_command(manifest_text: str, index: int) -> tup
         sys.executable,
         "-u",
         str(SCRIPTS / "openai_generate_reference.py"),
-        "--source-image",
-        source,
-        "--output",
-        output,
+        "--manifest",
+        rel(manifest),
+        "--row-index",
+        str(index),
         "--api-key",
         token,
         "--model",
@@ -357,8 +357,9 @@ def openai_reference_regeneration_command(manifest_text: str, index: int) -> tup
         cmd.extend(["--size", values["openai_image_size"]])
     if values.get("openai_image_quality"):
         cmd.extend(["--quality", values["openai_image_quality"]])
-    if row.get("prompt"):
-        cmd.extend(["--add-prompt", row["prompt"]])
+    if values.get("openai_send_references", "false") == "true":
+        cmd.extend(["--reference-count", "3"])
+    cmd.append("--force")
     return cmd, output
 
 def regenerate_reference_image(manifest_text: str, index: int) -> dict[str, str]:
