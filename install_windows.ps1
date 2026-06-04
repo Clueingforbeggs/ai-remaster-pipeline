@@ -332,9 +332,42 @@ function Get-PythonLauncherCheck {
             Reason = "found $found"
         }
     }
+    $implementation = (($probe.Stdout, $probe.Stderr) -join "`n").Split("`n") |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -match '^implementation=' } |
+        ForEach-Object { $_.Substring('implementation='.Length) } |
+        Select-Object -First 1
+    if ($implementation -and $implementation -ne 'cpython') {
+        return [pscustomobject]@{
+            Success = $false
+            Reason = "found $implementation, but CPython is required"
+        }
+    }
+    $bits = (($probe.Stdout, $probe.Stderr) -join "`n").Split("`n") |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -match '^bits=' } |
+        ForEach-Object { $_.Substring('bits='.Length) } |
+        Select-Object -First 1
+    if ($bits -and $bits -ne '64') {
+        return [pscustomobject]@{
+            Success = $false
+            Reason = "found $bits-bit Python, but 64-bit Python is required for PyTorch"
+        }
+    }
+    $gilDisabled = (($probe.Stdout, $probe.Stderr) -join "`n").Split("`n") |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -match '^gil_disabled=' } |
+        ForEach-Object { $_.Substring('gil_disabled='.Length) } |
+        Select-Object -First 1
+    if ($gilDisabled -eq '1') {
+        return [pscustomobject]@{
+            Success = $false
+            Reason = 'found free-threaded Python, but standard CPython is required for PyTorch wheels'
+        }
+    }
     return [pscustomobject]@{
         Success = $true
-        Reason = 'found Python 3.13'
+        Reason = 'found 64-bit CPython 3.13'
     }
 }
 
@@ -662,8 +695,36 @@ function Install-Pip {
     Invoke-External -Command (@($PipelinePython, '-m', 'pip', 'install') + $Packages)
 }
 
+function Install-Pip-WithPyTorchHint {
+    param([string[]]$Packages)
+    try {
+        Install-Pip $Packages
+    } catch {
+        $packageText = $Packages -join ' '
+        if ($packageText -match '(^|\s)torch(\s|$)') {
+            Write-Host ''
+            Write-Host 'PyTorch wheel resolution failed.' -ForegroundColor Yellow
+            Write-Host 'This usually means the installer venv was created with an unsupported Python build, such as 32-bit Python or free-threaded Python.' -ForegroundColor Yellow
+            Write-Host 'Install standard 64-bit CPython 3.13 from python.org, delete this repo''s .venv folder, and rerun install_windows.bat.' -ForegroundColor Yellow
+            Write-Host "Current PyTorch index URL: $TorchIndexUrl" -ForegroundColor Yellow
+        }
+        throw
+    }
+}
+
 function Install-PythonBuildTools {
     Install-Pip @('--upgrade', 'pip', 'wheel')
+}
+
+function Assert-PipelinePythonCompatible {
+    if (-not (Test-Path -LiteralPath $PipelinePython)) {
+        return
+    }
+    $check = Get-PythonLauncherCheck @($PipelinePython)
+    if (-not $check.Success) {
+        throw "The existing installer virtual environment is not compatible: $($check.Reason). Delete '$Root\.venv', install standard 64-bit CPython 3.13, and rerun install_windows.bat."
+    }
+    Write-Host "Installer Python check: $($check.Reason)"
 }
 
 function Install-RequirementsIfPresent {
@@ -781,12 +842,13 @@ Invoke-Step 'Create ai-remaster-pipeline venv' {
     if (-not (Test-Path -LiteralPath $PipelinePython)) {
         Invoke-PythonLauncher -Arguments @('-m', 'venv', (Join-Path $Root '.venv'))
     }
+    Assert-PipelinePythonCompatible
     Install-PythonBuildTools
     Invoke-External -Command @($PipelinePython, '-m', 'pip', 'install', '-r', (Join-Path $Root 'requirements.txt'))
 }
 
 Invoke-Step 'Install PyTorch CUDA and ComfyUI requirements' {
-    Install-Pip @('torch', 'torchvision', 'torchaudio', '--index-url', $TorchIndexUrl)
+    Install-Pip-WithPyTorchHint @('torch', 'torchvision', 'torchaudio', '--index-url', $TorchIndexUrl)
     Install-RequirementsIfPresent (Join-Path $ComfyDir 'requirements.txt')
     Install-Pip @('huggingface_hub[cli]', 'opencv-contrib-python', 'imageio-ffmpeg', 'pillow', 'numpy', 'numba')
 }
