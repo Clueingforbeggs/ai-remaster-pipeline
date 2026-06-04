@@ -97,7 +97,7 @@ def _build_guide_frames_view(
             "image": image_rel,
             "image_exists": image_exists,
             "image_mtime": int(image_path.stat().st_mtime_ns) if image_exists and image_path else 0,
-            "source_preview": aspect_preview_at(source_text, aspect, source_secs),
+            "source_preview": "",
         })
     return view
 

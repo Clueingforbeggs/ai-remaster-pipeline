@@ -1392,14 +1392,46 @@ def outpaint_chunks_state(settings: dict) -> dict:
             "raw_mtime": int(raw.stat().st_mtime_ns) if raw.exists() else 0,
             "prepared_exists": prepared.exists(),
             "guides": guides,
-            "source_start_preview": aspect_preview_at(source_text, aspect, start_seconds),
-            "source_middle_preview": aspect_preview_at(source_text, aspect, middle_seconds),
-            "source_end_preview": aspect_preview_at(source_text, aspect, max(start_seconds, end_seconds - (1 / max(1.0, fps)))),
-            "raw_start_preview": chunk_frame_preview(raw, 0.0, "raw_start") if raw.exists() else "",
-            "raw_middle_preview": chunk_frame_preview(raw, max(0.0, (end_seconds - start_seconds) / 2), "raw_middle") if raw.exists() else "",
-            "raw_end_preview": chunk_frame_preview(raw, max(0.0, end_seconds - start_seconds - (1 / max(1.0, fps))), "raw_end") if raw.exists() else "",
+            "source_start_preview": "",
+            "source_middle_preview": "",
+            "source_end_preview": "",
+            "raw_start_preview": "",
+            "raw_middle_preview": "",
+            "raw_end_preview": "",
         })
     return {"manifest": rel(manifest), "rows": view_rows}
+
+
+def outpaint_chunk_preview(settings: dict, chunk_index: int, kind: str, position: str) -> str:
+    chunks = outpaint_chunks_state(settings)
+    row = next((r for r in chunks.get("rows", []) if int(r.get("index", -1)) == chunk_index), None)
+    if row is None:
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+
+    position = position if position in {"start", "middle", "end"} else "middle"
+    fps = max(1.0, float(row.get("fps", 24) or 24))
+    start_seconds = float(row.get("start", 0.0) or 0.0)
+    end_seconds = float(row.get("end", start_seconds) or start_seconds)
+    duration = max(0.0, end_seconds - start_seconds)
+
+    if position == "start":
+        offset = 0.0
+    elif position == "end":
+        offset = max(0.0, duration - (1.0 / fps))
+    else:
+        offset = duration / 2
+
+    if kind == "raw":
+        raw = resolve(str(row.get("raw_path", "")))
+        if not raw.exists():
+            return ""
+        return chunk_frame_preview(raw, offset, f"raw_{chunk_index}_{position}")
+
+    source_text = pipeline_source_text(settings)
+    if not source_text:
+        return ""
+    aspect = settings.get("outpaint", {}).get("target_aspect", "16:9")
+    return aspect_preview_at(source_text, aspect, start_seconds + offset)
 
 
 

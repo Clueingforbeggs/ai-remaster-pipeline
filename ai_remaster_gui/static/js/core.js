@@ -316,6 +316,8 @@ function drawTabs() {
 
 async function selectTab(tab) {
   active = tab;
+  drawTabs();
+  if (tab === 'outpaint') showOutpaintLoadingShell();
   state = await api(stateUrl());
   pruneSelected();
   drawTabs();
@@ -323,6 +325,20 @@ async function selectTab(tab) {
   wireColourShotVideos();
   lastRenderSignature = renderSignature();
   lastOutpaintVisualSignature = outpaintVisualSignature();
+}
+
+function showOutpaintLoadingShell() {
+  const app = document.getElementById('app');
+  if (!app) return;
+  app.innerHTML = `
+    <section class="card outpaint-loading">
+      <span class="spinner"></span>
+      <div>
+        <h2>Preparing Outpainting</h2>
+        <p class="shot-empty">Checking chunk ranges and cached previews...</p>
+      </div>
+    </section>
+  `;
 }
 
 function stage(key) {

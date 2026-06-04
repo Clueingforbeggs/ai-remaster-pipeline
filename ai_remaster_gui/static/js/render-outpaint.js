@@ -241,6 +241,8 @@ function updateOutpaintRawPreviews() {
     container.innerHTML = outpaintRawFramesHtml(row);
     container.dataset.rawSignature = signature;
   }
+  hydratePendingOutpaintPreviews();
+  hydratePendingGuidePreviews();
 }
 
 function updateOutpaintRuntimeControls() {
@@ -332,7 +334,10 @@ function chunkStillStrip(row, prefix, canAnchor) {
   ];
   return `
     <div class="chunk-stills">
-      ${frames.map(([key, label, position]) => row[key] ? chunkStillFigure(row, row[key], label, position, canAnchor) : missingImage(label + ' frame not present')).join('')}
+      ${frames.map(([key, label, position]) => row[key]
+        ? chunkStillFigure(row, row[key], label, position, canAnchor)
+        : pendingChunkStillFigure(row, prefix, label, position)
+      ).join('')}
     </div>
   `;
 }
@@ -353,6 +358,29 @@ function chunkStillFigure(row, path, label, position, canAnchor) {
   `;
 }
 
+function pendingChunkStillFigure(row, prefix, label, position) {
+  const idx = row.index;
+  const kind = prefix === 'raw' ? 'raw' : 'source';
+  if (kind === 'raw' && !row.raw_exists) {
+    return missingImage(label + ': Outpainted chunk not present');
+  }
+  return `
+    <figure class="still-figure">
+      <img
+        id="chunkThumb_${kind}_${idx}_${position}"
+        class="pending-thumb"
+        alt=""
+        data-outpaint-thumb="true"
+        data-chunk-index="${idx}"
+        data-thumb-kind="${kind}"
+        data-thumb-position="${esc(position)}"
+        title="Preview loading"
+      >
+      <figcaption>${esc(label)}</figcaption>
+    </figure>
+  `;
+}
+
 function missingChunkStillStrip(text) {
   return `
     <div class="chunk-stills">
@@ -364,6 +392,75 @@ function missingChunkStillStrip(text) {
       `).join('')}
     </div>
   `;
+}
+
+const outpaintThumbQueue = [];
+let outpaintThumbActive = 0;
+
+function hydratePendingOutpaintPreviews() {
+  if (active !== 'outpaint') return;
+  document.querySelectorAll('img[data-outpaint-thumb]:not([data-thumb-loading]):not([data-thumb-loaded])').forEach(img => {
+    img.dataset.thumbLoading = 'true';
+    outpaintThumbQueue.push(img);
+  });
+  pumpOutpaintThumbQueue();
+}
+
+function pumpOutpaintThumbQueue() {
+  while (outpaintThumbActive < 2 && outpaintThumbQueue.length) {
+    const img = outpaintThumbQueue.shift();
+    if (!img || !img.isConnected) continue;
+    outpaintThumbActive += 1;
+    loadOutpaintThumb(img).finally(() => {
+      outpaintThumbActive = Math.max(0, outpaintThumbActive - 1);
+      pumpOutpaintThumbQueue();
+    });
+  }
+}
+
+async function loadOutpaintThumb(img) {
+  const chunkIndex = img.dataset.chunkIndex || '0';
+  const kind = img.dataset.thumbKind || 'source';
+  const position = img.dataset.thumbPosition || 'middle';
+  const result = await api(
+    `/api/outpaint-chunk-preview?chunk_index=${encodeURIComponent(chunkIndex)}`
+    + `&kind=${encodeURIComponent(kind)}&position=${encodeURIComponent(position)}`
+  );
+  if (!img.isConnected) return;
+  if (result && result.preview) {
+    const src = media(result.preview) + '&t=' + Date.now();
+    img.classList.remove('pending-thumb');
+    img.src = src;
+    img.onclick = () => openImageModal(src, `${position[0].toUpperCase()}${position.slice(1)} frame`);
+    if (!img.parentElement.querySelector('.still-actions')) {
+      img.insertAdjacentHTML('afterend', `
+        <div class="still-actions">
+          <button type="button" onclick="event.stopPropagation(); exportMedia(${jsArg(result.preview)})" title="Save this frame">&#128190;</button>
+        </div>
+      `);
+    }
+    img.dataset.thumbLoaded = 'true';
+    img.removeAttribute('title');
+  } else {
+    delete img.dataset.thumbLoading;
+  }
+}
+
+function hydratePendingGuidePreviews() {
+  if (active !== 'outpaint') return;
+  document.querySelectorAll('img[id^="gfThumb_"].pending-thumb:not([data-guide-loading]):not([data-guide-loaded])').forEach(img => {
+    const match = img.id.match(/^gfThumb_(\d+)_(\d+)$/);
+    if (!match || img.closest('.has-anchor')) return;
+    const slider = document.getElementById(`gfSlider_${match[1]}_${match[2]}`);
+    img.dataset.guideLoading = 'true';
+    fetchGuideFramePreview(Number(match[1]), Number(match[2]), Number(slider ? slider.value : 0))
+      .then(() => {
+        if (img.isConnected && img.src) img.dataset.guideLoaded = 'true';
+      })
+      .finally(() => {
+        if (img.isConnected && !img.dataset.guideLoaded) delete img.dataset.guideLoading;
+      });
+  });
 }
 
 function drawOutpaint(st, s, expected, sp) {
@@ -405,4 +502,6 @@ function drawOutpaint(st, s, expected, sp) {
 
   bindStageFields('outpaint');
   showCommand('outpaint');
+  hydratePendingOutpaintPreviews();
+  hydratePendingGuidePreviews();
 }

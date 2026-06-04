@@ -102,6 +102,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 APP.log.append(f"Auto Crop failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/outpaint-chunk-preview":
+            query = parse_qs(parsed.query)
+            try:
+                preview = outpaint_chunk_preview(
+                    APP.settings,
+                    int(query.get("chunk_index", ["0"])[0]),
+                    query.get("kind", ["source"])[0],
+                    query.get("position", ["middle"])[0],
+                )
+                self.send_json({"ok": True, "preview": preview})
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/outpaint-guide-preview":
             query = parse_qs(parsed.query)
             try:
