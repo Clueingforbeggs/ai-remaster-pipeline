@@ -4,12 +4,14 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .config import IMAGE_EXTS, ROOT, SCRIPTS
 from .manifests import read_outpaint_chunk_rows, write_outpaint_chunk_rows
 from .media import extract_video_frame_at
 from .paths import rel, resolve, resolve_video_source
+from .sam_masks import sam2_mask_for_image
 
 
 def bind_context(context: dict) -> None:
@@ -520,3 +522,188 @@ def clear_guide_frame_image(chunk_index: int, guide_index: int) -> dict:
     _save_guide_frames(manifest, chunk_index, frames)
     APP.log.append(f"Cleared guide frame {guide_index} image for chunk {chunk_index + 1}")
     return {"image": ""}
+
+def _guide_edit_dir(manifest: Path, chunk_index: int, guide_index: int) -> Path:
+    return ROOT / "intermediate" / "outpaint_guides" / manifest.stem / "edits" / f"chunk_{chunk_index:04d}_guide_{guide_index:02d}"
+
+def _next_guide_edit_output(manifest: Path, chunk_index: int, guide_index: int) -> Path:
+    folder = _guide_edit_dir(manifest, chunk_index, guide_index)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    base = folder / f"edit_{stamp}.png"
+    if not base.exists() and not base.with_suffix(base.suffix + ".json").exists():
+        return base
+    suffix = 1
+    while True:
+        candidate = folder / f"edit_{stamp}_{suffix:02d}.png"
+        if not candidate.exists() and not candidate.with_suffix(candidate.suffix + ".json").exists():
+            return candidate
+        suffix += 1
+
+def _save_guide_edit_mask(manifest: Path, chunk_index: int, guide_index: int, mask_data: str) -> str:
+    if not mask_data:
+        return ""
+    import base64
+
+    payload = mask_data.split(",", 1)[1] if "," in mask_data else mask_data
+    raw = base64.b64decode(payload)
+    folder = _guide_edit_dir(manifest, chunk_index, guide_index)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"mask_{time.strftime('%Y%m%d_%H%M%S')}.png"
+    path.write_bytes(raw)
+    return rel(path)
+
+def _guide_edit_prompt(instruction: str, sampled_color: str = "") -> str:
+    parts = [instruction.strip()]
+    if sampled_color.strip():
+        parts.append(f"Use the sampled colour/value exactly where relevant: {sampled_color.strip()}.")
+    return " ".join(part for part in parts if part).strip() or DEFAULT_ANCHOR_PROMPT
+
+def _guide_editor_source(chunk_index: int, guide_index: int, frames: list[dict]) -> tuple[str, Path | None, float | None]:
+    current = frames[guide_index].get("image", "")
+    if current and resolve(current).is_file():
+        return current, None, None
+    state = outpaint_chunks_state(APP.settings)
+    rows = state.get("rows", [])
+    if chunk_index < 0 or chunk_index >= len(rows):
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+    row = rows[chunk_index]
+    fps = float(row.get("fps", 24) or 24)
+    source_seconds = _guide_source_seconds(row, int(frames[guide_index].get("frame_idx", 0)), fps)
+    source_text = pipeline_source_text(APP.settings)
+    if not source_text:
+        raise RuntimeError("No source material is selected.")
+    prepared = ensure_outpaint_prepared_canvas(source_text, APP.settings.get("outpaint", {}))
+    preview_rel = chunk_frame_preview(prepared, source_seconds, f"guide_edit_{chunk_index}_{guide_index}")
+    if not preview_rel or not resolve(preview_rel).is_file():
+        raise FileNotFoundError("Could not prepare a guide image for editing.")
+    return preview_rel, prepared, source_seconds
+
+def guide_edit_preview_command(chunk_index: int, guide_index: int, instruction: str, mask_data: str = "", sampled_color: str = "") -> tuple[list[str], str]:
+    manifest, rows, _manifest_text = _get_guide_manifest()
+    if chunk_index not in rows:
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+    frames = _parse_guide_frames(rows[chunk_index])
+    if guide_index < 0 or guide_index >= len(frames):
+        raise IndexError(f"Guide frame {guide_index} not found in chunk {chunk_index + 1}")
+    source_rel, _prepared, _source_seconds = _guide_editor_source(chunk_index, guide_index, frames)
+    source = resolve(source_rel)
+    output = _next_guide_edit_output(manifest, chunk_index, guide_index)
+    mask = _save_guide_edit_mask(manifest, chunk_index, guide_index, mask_data)
+    prompt = _guide_edit_prompt(instruction, sampled_color)
+    values = APP.settings.get("references", {})
+    config = current_config()
+    comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
+    comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
+    comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
+    if mask:
+        workflow = qwen_masked_workflow_for(values, config)
+        if not workflow:
+            raise RuntimeError("Masked guide editing needs a Qwen masked edit workflow. ARP's bundled masked workflow was not found, and no custom workflow is set.")
+        if not resolve(workflow).is_file():
+            raise FileNotFoundError(f"Masked edit workflow not found: {workflow}")
+        cmd = [
+            sys.executable, "-u", str(SCRIPTS / "edit_reference_image.py"),
+            "--source-image", str(source),
+            "--mask", mask,
+            "--output", rel(output),
+            "--workflow", workflow,
+            "--comfy-url", comfy_url,
+            "--comfy-dir", comfy_dir,
+            "--comfy-output-root", comfy_output,
+            "--model-backend", values.get("model_backend", "gguf"),
+            "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            "--instruction", prompt,
+            "--no-normalize-to-source-size",
+            "--force",
+        ]
+    else:
+        workflow = qwen_workflow_for(values, config)
+        cmd = [
+            sys.executable, "-u", str(SCRIPTS / "generate_single_reference.py"),
+            "--source-image", str(source),
+            "--output", rel(output),
+            "--workflow", workflow,
+            "--comfy-url", comfy_url,
+            "--comfy-dir", comfy_dir,
+            "--comfy-output-root", comfy_output,
+            "--model-backend", values.get("model_backend", "gguf"),
+            "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            "--prompt", prompt,
+            "--prompt-suffix", "",
+            "--load-image-node-id", values.get("load_image_node_id", "auto"),
+            "--save-node-id", values.get("save_node_id", "auto"),
+            "--no-normalize-to-source-size",
+            "--force",
+        ]
+        if values.get("prompt_node_id"):
+            cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    output.with_suffix(output.suffix + ".json").write_text(
+        json.dumps(
+            {
+                "chunk_index": chunk_index,
+                "guide_index": guide_index,
+                "source_image": rel(source),
+                "mask": mask,
+                "instruction": instruction,
+                "sampled_color": sampled_color,
+                "prompt": prompt,
+                "output": rel(output),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return cmd, rel(output)
+
+def sam_guide_mask(chunk_index: int, guide_index: int, points: list[dict], width: int, height: int, fallback_path: str = "") -> dict[str, str]:
+    manifest, rows, _manifest_text = _get_guide_manifest()
+    if chunk_index not in rows:
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+    frames = _parse_guide_frames(rows[chunk_index])
+    if guide_index < 0 or guide_index >= len(frames):
+        raise IndexError(f"Guide frame {guide_index} not found in chunk {chunk_index + 1}")
+    source_rel = frames[guide_index].get("image", "") or fallback_path
+    if not source_rel:
+        source_rel, _prepared, _source_seconds = _guide_editor_source(chunk_index, guide_index, frames)
+    source = resolve(source_rel)
+    if not source.is_file():
+        raise FileNotFoundError(f"Guide image not found: {source_rel}")
+    return sam2_mask_for_image(source, points, width, height)
+
+def accept_guide_edit(chunk_index: int, guide_index: int, preview_path: str) -> dict:
+    manifest, rows, _ = _get_guide_manifest()
+    if chunk_index not in rows:
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+    frames = _parse_guide_frames(rows[chunk_index])
+    if guide_index < 0 or guide_index >= len(frames):
+        raise IndexError(f"Guide frame {guide_index} not found in chunk {chunk_index + 1}")
+    preview = resolve(preview_path)
+    if not preview.is_file():
+        raise FileNotFoundError(f"Edited guide not found: {preview}")
+    previous = frames[guide_index].get("image", "")
+    frames[guide_index]["image_previous"] = previous
+    frames[guide_index]["image"] = rel(preview)
+    _save_guide_frames(manifest, chunk_index, frames)
+    APP.log.append(f"Accepted edited guide frame {guide_index + 1} for chunk {chunk_index + 1}: {rel(preview)}")
+    return {"image": rel(preview), "previous": previous}
+
+def revert_guide_edit(chunk_index: int, guide_index: int) -> dict:
+    manifest, rows, _ = _get_guide_manifest()
+    if chunk_index not in rows:
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+    frames = _parse_guide_frames(rows[chunk_index])
+    if guide_index < 0 or guide_index >= len(frames):
+        raise IndexError(f"Guide frame {guide_index} not found in chunk {chunk_index + 1}")
+    current = frames[guide_index].get("image", "")
+    previous = frames[guide_index].get("image_previous", "")
+    if not previous:
+        raise RuntimeError("No previous guide image is recorded for this guide frame.")
+    if not resolve(previous).is_file():
+        raise FileNotFoundError(f"Previous guide image not found: {previous}")
+    frames[guide_index]["image_previous"] = current
+    frames[guide_index]["image"] = previous
+    _save_guide_frames(manifest, chunk_index, frames)
+    APP.log.append(f"Reverted guide frame {guide_index + 1} for chunk {chunk_index + 1}: {previous}")
+    return {"image": previous, "previous": current}

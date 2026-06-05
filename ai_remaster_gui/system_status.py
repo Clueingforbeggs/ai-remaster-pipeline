@@ -8,6 +8,7 @@ import time
 
 _CACHE: dict[str, object] = {"at": 0.0, "data": {}}
 _CACHE_SECONDS = 5.0
+_CPU_TIMES: tuple[int, int] | None = None
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -24,16 +25,26 @@ class _MemoryStatus(ctypes.Structure):
     ]
 
 
+class _FileTime(ctypes.Structure):
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_ulong),
+        ("dwHighDateTime", ctypes.c_ulong),
+    ]
+
+
 def system_status() -> dict:
     now = time.monotonic()
     cached = _CACHE.get("data")
     if isinstance(cached, dict) and cached and now - float(_CACHE.get("at", 0.0)) < _CACHE_SECONDS:
         return cached
 
+    vram = vram_status()
     data = {
         "cuda": cuda_status(),
+        "cpu": cpu_status(),
+        "gpu": gpu_status(vram),
         "ram": ram_status(),
-        "vram": vram_status(),
+        "vram": vram,
     }
     _CACHE["at"] = now
     _CACHE["data"] = data
@@ -76,6 +87,55 @@ def ram_status() -> dict:
     return {"label": "RAM unknown", "used": None, "total": None, "percent": None, "detail": "RAM status unavailable"}
 
 
+def cpu_status() -> dict:
+    try:
+        percent = windows_cpu_percent()
+        if percent is not None:
+            return utilization_payload("CPU", percent, "Total processor utilization")
+    except Exception:
+        pass
+    return {"name": "CPU", "label": "CPU unknown", "percent": None, "detail": "CPU utilization unavailable"}
+
+
+def windows_cpu_percent() -> int | None:
+    global _CPU_TIMES
+    try:
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    except AttributeError:
+        return None
+
+    idle = _FileTime()
+    kernel = _FileTime()
+    user = _FileTime()
+    if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+        return None
+    idle_now = filetime_to_int(idle)
+    total_now = filetime_to_int(kernel) + filetime_to_int(user)
+    previous = _CPU_TIMES
+    _CPU_TIMES = (idle_now, total_now)
+    if previous is None:
+        time.sleep(0.05)
+        return windows_cpu_percent()
+    idle_delta = max(0, idle_now - previous[0])
+    total_delta = max(0, total_now - previous[1])
+    if total_delta <= 0:
+        return None
+    busy = max(0.0, min(100.0, 100.0 * (1.0 - (idle_delta / total_delta))))
+    return int(round(busy))
+
+
+def filetime_to_int(value: _FileTime) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+
+def gpu_status(vram: dict) -> dict:
+    percent = vram.get("gpu_utilization")
+    if isinstance(percent, int):
+        name = str(vram.get("gpu_name") or "GPU")
+        return utilization_payload("GPU", percent, f"{name} utilization")
+    return {"name": "GPU", "label": "GPU unknown", "percent": None, "detail": "GPU utilization unavailable"}
+
+
 def vram_status() -> dict:
     nvidia_smi = shutil.which("nvidia-smi")
     if nvidia_smi:
@@ -100,6 +160,7 @@ def vram_status() -> dict:
                 payload = memory_payload("VRAM", used, total, percent)
                 payload["detail"] = f"{payload['detail']} - {name} - {util_text}% GPU utilization"
                 payload["gpu_utilization"] = int(util_text)
+                payload["gpu_name"] = name
                 return payload
         except Exception as exc:
             return {"label": "VRAM unknown", "used": None, "total": None, "percent": None, "detail": str(exc)}
@@ -127,6 +188,16 @@ def memory_payload(name: str, used: int, total: int, percent: int) -> dict:
         "total": total,
         "percent": percent,
         "detail": f"{format_bytes(used)} / {format_bytes(total)} used ({percent}%)",
+    }
+
+
+def utilization_payload(name: str, percent: int, detail: str) -> dict:
+    percent = max(0, min(100, int(percent)))
+    return {
+        "name": name,
+        "label": f"{name} {percent}% used",
+        "percent": percent,
+        "detail": f"{detail}: {percent}%",
     }
 
 

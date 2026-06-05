@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import unittest
 import sys
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import comfy_api  # noqa: E402
 import colorize_video  # noqa: E402
 import generate_single_reference  # noqa: E402
+import edit_reference_image  # noqa: E402
 import openai_generate_reference  # noqa: E402
 import outpaint_video  # noqa: E402
 import prepare_outpaint_input  # noqa: E402
@@ -28,6 +30,8 @@ import qwen_colorize_references  # noqa: E402
 
 from ai_remaster_gui import app
 from ai_remaster_gui import config
+from ai_remaster_gui import outpaint_guides
+from ai_remaster_gui import sam_masks
 from ai_remaster_gui import server
 
 
@@ -178,7 +182,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("VHS_LoadVideo", class_types)
         self.assertIn("VHS_VideoCombine", class_types)
 
-    def test_outpaint_prompt_sent_to_ic_lora_guide_is_global_outpaint_only(self) -> None:
+    def test_outpaint_prompt_sent_to_ic_lora_guide_combines_global_and_chunk_suffix(self) -> None:
         workflow = json.loads((app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json").read_text(encoding="utf-8-sig"))
         args = outpaint_video.build_parser().parse_args(
             [
@@ -187,7 +191,7 @@ class GuiSmokeTests(unittest.TestCase):
                 "--comfy-dir",
                 str(app.ROOT),
                 "--prompt",
-                "outpaint",
+                "outpaint with natural film grain",
                 "--dry-run",
             ]
         )
@@ -203,16 +207,16 @@ class GuiSmokeTests(unittest.TestCase):
                 app.ROOT / "prepared.mp4",
                 app.ROOT,
                 "arp_outpaint/test",
-                outpaint_video.combine_prompt(args.prompt, ""),
+                outpaint_video.combine_prompt(args.prompt, "continue the wallpaper"),
                 args.negative_prompt,
                 42,
             )
 
-        self.assertEqual(prompt["2483"]["inputs"]["text"], "outpaint")
+        self.assertEqual(prompt["2483"]["inputs"]["text"], "outpaint with natural film grain. continue the wallpaper")
         self.assertEqual(prompt["5012"]["inputs"]["positive"], ["1241", 0])
         self.assertEqual(prompt["1241"]["inputs"]["positive"], ["2483", 0])
 
-    def test_outpaint_command_forces_global_prompt_to_outpaint(self) -> None:
+    def test_outpaint_command_uses_global_prompt(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "0", "section_end": ""})
         app.APP.settings["outpaint"].update(
             {
@@ -220,7 +224,27 @@ class GuiSmokeTests(unittest.TestCase):
                 "target_height": "720",
                 "chunk_seconds": "20",
                 "overlap_frames": "8",
-                "prompt": "stale verbose prompt that should not reach the LoRA",
+                "prompt": "outpaint with restrained natural edges",
+                "crop_left": "0",
+                "crop_right": "0",
+                "crop_top": "0",
+                "crop_bottom": "0",
+            }
+        )
+
+        command = app.APP.command_for("outpaint")
+
+        self.assertEqual(command[command.index("--prompt") + 1], "outpaint with restrained natural edges")
+
+    def test_outpaint_command_falls_back_to_activation_prompt_when_global_prompt_blank(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "0", "section_end": ""})
+        app.APP.settings["outpaint"].update(
+            {
+                "target_aspect": "16:9",
+                "target_height": "720",
+                "chunk_seconds": "20",
+                "overlap_frames": "8",
+                "prompt": "",
                 "crop_left": "0",
                 "crop_right": "0",
                 "crop_top": "0",
@@ -232,7 +256,12 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(command[command.index("--prompt") + 1], "outpaint")
 
-    def test_outpaint_manifest_sync_clears_chunk_prompt_suffixes(self) -> None:
+    def test_outpaint_prompt_combiner_adds_sentence_separator_for_chunk_suffix(self) -> None:
+        self.assertEqual(outpaint_video.combine_prompt("outpaint", "continue the room"), "outpaint. continue the room")
+        self.assertEqual(outpaint_video.combine_prompt("outpaint.", "continue the room"), "outpaint. continue the room")
+        self.assertEqual(outpaint_video.combine_prompt("", "continue the room"), "continue the room")
+
+    def test_outpaint_manifest_sync_preserves_chunk_prompt_suffixes(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
             folder = Path(tmp_text)
             manifest = folder / "chunks.csv"
@@ -251,7 +280,30 @@ class GuiSmokeTests(unittest.TestCase):
 
             rows = outpaint_video.sync_chunk_manifest(manifest, [(0, 0, 10)], 24.0, folder, 42)
 
-            self.assertEqual(rows[0]["prompt_suffix"], "")
+            self.assertEqual(rows[0]["prompt_suffix"], "stale per-chunk direction")
+
+    def test_outpaint_manifest_sync_uses_offset_specific_chunk_paths(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            outpaint_video.write_chunk_manifest(
+                manifest,
+                [
+                    {
+                        "chunk_index": "0",
+                        "start_frame": "0",
+                        "end_frame": "10",
+                        "seed": "42",
+                        "offset_x": "12",
+                        "offset_y": "-4",
+                    }
+                ],
+            )
+
+            rows = outpaint_video.sync_chunk_manifest(manifest, [(0, 0, 10)], 24.0, folder, 42)
+
+            self.assertIn("_ox+12_oy-4", rows[0]["prepared_path"])
+            self.assertIn("_ox+12_oy-4", rows[0]["raw_path"])
 
     def test_colormnet_correlation_extension_install_is_opt_in(self) -> None:
         downloader_path = app.ROOT / "vendor" / "comfyui_custom_nodes" / "reference-video-colorization" / "colormnet" / "downloader.py"
@@ -418,6 +470,117 @@ class GuiSmokeTests(unittest.TestCase):
             stored = app.read_outpaint_chunk_rows(manifest)[0]
             self.assertEqual(stored["seed"], "43")
             self.assertEqual(stored["custom_seconds"], "")
+
+    def test_outpaint_chunk_save_persists_prompt_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            manifest = Path(tmp_text) / "chunks.csv"
+            rows = [
+                {
+                    "chunk_index": "0",
+                    "start_frame": "0",
+                    "end_frame": "120",
+                    "start_seconds": "0.000000",
+                    "end_seconds": "5.000000",
+                    "seed": "42",
+                    "prompt_suffix": "",
+                    "negative_suffix": "",
+                }
+            ]
+            app.write_outpaint_chunk_rows(manifest, rows)
+
+            with mock.patch.object(server, "outpaint_chunks_state", return_value={"manifest": str(manifest)}):
+                app.update_outpaint_chunk(
+                    0,
+                    seed="43",
+                    prompt_suffix="avoid changing the actor's hands",
+                    negative_suffix="extra fingers",
+                )
+
+            stored = app.read_outpaint_chunk_rows(manifest)[0]
+            self.assertEqual(stored["prompt_suffix"], "avoid changing the actor's hands")
+            self.assertEqual(stored["negative_suffix"], "extra fingers")
+
+    def test_outpaint_chunk_save_persists_offsets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            manifest = Path(tmp_text) / "chunks.csv"
+            rows = [{"chunk_index": "0", "start_frame": "0", "end_frame": "120", "seed": "42"}]
+            app.write_outpaint_chunk_rows(manifest, rows)
+
+            with mock.patch.object(server, "outpaint_chunks_state", return_value={"manifest": str(manifest)}):
+                app.update_outpaint_chunk(0, seed="42", prompt_suffix="", offset_x="-11", offset_y="7")
+
+            stored = app.read_outpaint_chunk_rows(manifest)[0]
+            self.assertEqual(stored["offset_x"], "-11")
+            self.assertEqual(stored["offset_y"], "7")
+
+    def test_outpaint_chunk_preview_passes_chunk_offsets(self) -> None:
+        settings = {"outpaint": {"target_aspect": "16:9"}}
+        fake_state = {
+            "rows": [
+                {
+                    "index": 0,
+                    "start": 1.0,
+                    "end": 2.0,
+                    "fps": 24.0,
+                    "offset_x": "13",
+                    "offset_y": "-5",
+                    "raw_path": "",
+                }
+            ]
+        }
+        with (
+            mock.patch.object(server, "outpaint_chunks_state", return_value=fake_state),
+            mock.patch.object(server, "pipeline_source_text", return_value="input/example.mp4"),
+            mock.patch.object(server, "aspect_preview_at", return_value="preview.jpg") as preview,
+        ):
+            self.assertEqual(app.outpaint_chunk_preview(settings, 0, "source", "middle"), "preview.jpg")
+
+        preview.assert_called_once_with("input/example.mp4", "16:9", 1.5, 13, -5)
+
+
+    def test_outpaint_chunk_state_reports_exact_prompts_sent_to_comfy(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "source.mp4"
+            source.write_bytes(b"video")
+            manifest = folder / "chunks.csv"
+            app.write_outpaint_chunk_rows(
+                manifest,
+                [
+                    {
+                        "chunk_index": "0",
+                        "start_frame": "0",
+                        "end_frame": "24",
+                        "seed": "42",
+                        "prompt_suffix": "extend the wallpaper",
+                        "negative_suffix": "extra hands",
+                    }
+                ],
+            )
+            settings = {
+                "global": {"source": app.rel(source), "section_start": "0", "section_end": ""},
+                "outpaint": {
+                    "target_aspect": "16:9",
+                    "target_height": "720",
+                    "chunk_seconds": "1",
+                    "overlap_frames": "0",
+                    "prompt": "outpaint with natural edges",
+                    "negative_prompt": "text",
+                },
+            }
+            with (
+                mock.patch.object(server, "ensure_source_section_clip"),
+                mock.patch.object(server, "resolve_video_source", return_value=source),
+                mock.patch.object(server, "video_metrics", return_value={"fps": 24.0, "frames": 24}),
+                mock.patch.object(server, "outpaint_chunk_manifest_for", return_value=app.rel(manifest)),
+                mock.patch.object(server, "outpaint_chunk_dir_for", return_value=folder),
+            ):
+                state = app.outpaint_chunks_state(settings)
+
+        row = state["rows"][0]
+        self.assertEqual(row["effective_prompt"], "outpaint with natural edges. extend the wallpaper")
+        self.assertEqual(row["effective_negative_prompt"], "text. extra hands")
+
 
     def test_clearing_outpaint_guide_deletes_cached_chunk_guides(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
@@ -717,6 +880,244 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(chosen, [refs[0], refs[2], refs[3]])
         self.assertEqual(early, [refs[2], refs[3], refs[4]])
 
+    def test_reference_edit_recent_references_prefer_previous_then_later(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            refs = []
+            rows = []
+            for index in range(5):
+                color = folder / f"color_{index}.png"
+                if index in {0, 2, 3, 4}:
+                    color.write_bytes(b"ref")
+                refs.append(app.rel(color))
+                rows.append({"color_reference": app.rel(color)})
+
+            chosen = app.recent_color_references(rows, 1, 3)
+            early = app.recent_color_references(rows, 0, 3)
+
+        self.assertEqual(chosen, [refs[0], refs[2], refs[3]])
+        self.assertEqual(early, [refs[2], refs[3], refs[4]])
+
+    def test_sam2_mask_helper_uses_point_prompts_and_returns_mask_data_url(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        class FakePredictor:
+            def __init__(self) -> None:
+                self.image_shape = None
+                self.point_coords = None
+                self.point_labels = None
+
+            def set_image(self, image) -> None:
+                self.image_shape = image.shape
+
+            def predict(self, point_coords=None, point_labels=None, multimask_output=True):
+                self.point_coords = point_coords
+                self.point_labels = point_labels
+                masks = np.zeros((2, 4, 4), dtype=np.uint8)
+                masks[1, 1:3, 1:3] = 1
+                return masks, np.array([0.2, 0.9]), None
+
+        predictor = FakePredictor()
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            image = Path(tmp_text) / "source.png"
+            Image.new("RGB", (4, 4), (20, 30, 40)).save(image)
+            with mock.patch.object(sam_masks, "_sam2_predictor", return_value=predictor):
+                result = sam_masks.sam2_mask_for_image(
+                    image,
+                    [{"x": 1, "y": 1, "label": "add"}, {"x": 2, "y": 2, "label": "subtract"}],
+                    4,
+                    4,
+                )
+
+        self.assertTrue(result["mask"].startswith("data:image/png;base64,"))
+        self.assertIn("SAM 2.1 Hiera Large", result["provider"])
+        self.assertEqual(predictor.image_shape, (4, 4, 3))
+        self.assertEqual(predictor.point_labels.tolist(), [1, 0])
+        self.assertEqual(predictor.point_coords.tolist(), [[1.0, 1.0], [2.0, 2.0]])
+
+    def test_reference_edit_preview_command_selects_masked_and_unmasked_runners(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "refs.csv"
+            source = folder / "bw.png"
+            color = folder / "color.png"
+            masked_workflow = folder / "masked.json"
+            source.write_bytes(b"bw")
+            color.write_bytes(b"color")
+            masked_workflow.write_text("{}", encoding="utf-8")
+            app.write_manifest_details(
+                manifest,
+                "input/example.mp4",
+                ["enabled", "end", "source_reference", "color_reference", "prompt"],
+                [{"enabled": "true", "end": "00:00:01.000", "source_reference": app.rel(source), "color_reference": app.rel(color), "prompt": ""}],
+            )
+            app.APP.settings["references"].update(
+                {
+                    "workflow": "workflows/qwen_image_edit/Image Edit (Qwen 2511).json",
+                    "masked_workflow": app.rel(masked_workflow),
+                }
+            )
+            unmasked, unmasked_output = app.reference_edit_preview_command(app.rel(manifest), 0, "make it green")
+            masked, masked_output = app.reference_edit_preview_command(app.rel(manifest), 0, "make it green", "iVBORw0KGgo=")
+
+        self.assertIn("generate_single_reference.py", " ".join(unmasked))
+        self.assertIn("edit_reference_image.py", " ".join(masked))
+        self.assertIn("--mask", masked)
+        self.assertIn("outpainted_references_color_edits", unmasked_output)
+        self.assertIn("outpainted_references_color_edits", masked_output)
+
+    def test_reference_edit_accept_and_revert_updates_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "refs.csv"
+            source = folder / "bw.png"
+            color = folder / "color.png"
+            edit = folder / "edit.png"
+            source.write_bytes(b"bw")
+            color.write_bytes(b"color")
+            edit.write_bytes(b"edit")
+            app.write_manifest_details(
+                manifest,
+                "input/example.mp4",
+                ["enabled", "end", "source_reference", "color_reference", "prompt"],
+                [{"enabled": "true", "end": "00:00:01.000", "source_reference": app.rel(source), "color_reference": app.rel(color), "prompt": ""}],
+            )
+
+            accepted = app.accept_reference_edit(app.rel(manifest), 0, app.rel(edit))
+            after_accept = app.read_manifest(manifest)[0]
+            reverted = app.revert_reference_edit(app.rel(manifest), 0)
+            after_revert = app.read_manifest(manifest)[0]
+
+        self.assertEqual(accepted["color_reference"], app.rel(edit))
+        self.assertEqual(after_accept["color_reference_previous"], app.rel(color))
+        self.assertEqual(reverted["color_reference"], app.rel(color))
+        self.assertEqual(after_revert["color_reference_previous"], app.rel(edit))
+
+    def test_guide_edit_preview_command_selects_masked_and_unmasked_runners(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            guide = folder / "guide.png"
+            masked_workflow = folder / "masked.json"
+            guide.write_bytes(b"guide")
+            masked_workflow.write_text("{}", encoding="utf-8")
+            rows = [
+                {
+                    "chunk_index": "0",
+                    "start_frame": "0",
+                    "end_frame": "24",
+                    "start_seconds": "0",
+                    "end_seconds": "1",
+                    "guide_frames": json.dumps([{"frame_idx": 0, "strength": 0.7, "image": app.rel(guide)}]),
+                }
+            ]
+            app.write_outpaint_chunk_rows(manifest, rows)
+            app.APP.settings["references"].update(
+                {
+                    "workflow": "workflows/qwen_image_edit/Image Edit (Qwen 2511).json",
+                    "masked_workflow": app.rel(masked_workflow),
+                }
+            )
+            fake_state = {"manifest": app.rel(manifest), "rows": [{"index": 0}]}
+            with mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value=fake_state):
+                unmasked, unmasked_output = app.guide_edit_preview_command(0, 0, "replace detail")
+                masked, masked_output = app.guide_edit_preview_command(0, 0, "replace detail", "iVBORw0KGgo=")
+
+        self.assertIn("generate_single_reference.py", " ".join(unmasked))
+        self.assertIn("edit_reference_image.py", " ".join(masked))
+        self.assertIn("--mask", masked)
+        self.assertIn("outpaint_guides", unmasked_output)
+        self.assertIn("outpaint_guides", masked_output)
+
+    def test_masked_edit_uses_bundled_workflow_when_setting_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "refs.csv"
+            source = folder / "bw.png"
+            color = folder / "color.png"
+            source.write_bytes(b"bw")
+            color.write_bytes(b"color")
+            app.write_manifest_details(
+                manifest,
+                "input/example.mp4",
+                ["enabled", "end", "source_reference", "color_reference", "prompt"],
+                [{"enabled": "true", "end": "00:00:01.000", "source_reference": app.rel(source), "color_reference": app.rel(color), "prompt": ""}],
+            )
+            app.APP.settings["references"].update({"masked_workflow": ""})
+
+            command, _output = app.reference_edit_preview_command(app.rel(manifest), 0, "make it green", "iVBORw0KGgo=")
+
+        self.assertIn("edit_reference_image.py", " ".join(command))
+        self.assertIn("workflows/qwen_image_edit/Image Edit Inpaint (Qwen 2511).json", command)
+
+    def test_masked_edit_workflow_patches_user_instruction_into_positive_prompt(self) -> None:
+        import argparse
+
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            comfy_dir = folder / "comfy"
+            source = folder / "source.png"
+            mask = folder / "mask.png"
+            source.write_bytes(b"source")
+            mask.write_bytes(b"mask")
+            workflow = qwen_colorize_references.load_workflow(app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit Inpaint (Qwen 2511).json")
+            args = argparse.Namespace(
+                comfy_dir=comfy_dir,
+                load_image_node_id="auto",
+                mask_image_node_id="auto",
+                save_node_id="auto",
+                prompt_node_id=None,
+                load_image_widget="0",
+                mask_image_widget="0",
+                prompt_widget="0",
+                save_prefix_widget="0",
+            )
+
+            prompt = edit_reference_image.patch_masked_workflow(
+                args,
+                workflow,
+                source,
+                mask,
+                folder / "output.png",
+                "Replace the masked hat with a bright green hat.",
+            )
+
+        self.assertEqual(prompt["1"]["inputs"]["prompt"], "Replace the masked hat with a bright green hat.")
+        self.assertEqual(prompt["12"]["inputs"]["image"], "arp_qwen_ref_masks/mask.png")
+        self.assertEqual(prompt["11"]["inputs"]["image"], "arp_qwen_ref_edits/source.png")
+
+    def test_guide_edit_accept_and_revert_updates_guide_frames(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            guide = folder / "guide.png"
+            edit = folder / "edit.png"
+            guide.write_bytes(b"guide")
+            edit.write_bytes(b"edit")
+            rows = [
+                {
+                    "chunk_index": "0",
+                    "start_frame": "0",
+                    "end_frame": "24",
+                    "start_seconds": "0",
+                    "end_seconds": "1",
+                    "guide_frames": json.dumps([{"frame_idx": 0, "strength": 0.7, "image": app.rel(guide)}]),
+                }
+            ]
+            app.write_outpaint_chunk_rows(manifest, rows)
+            fake_state = {"manifest": app.rel(manifest), "rows": [{"index": 0}]}
+            with mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value=fake_state):
+                accepted = app.accept_guide_edit(0, 0, app.rel(edit))
+                accepted_frame = outpaint_guides._parse_guide_frames(app.read_outpaint_chunk_rows(manifest)[0])[0]
+                reverted = app.revert_guide_edit(0, 0)
+                reverted_frame = outpaint_guides._parse_guide_frames(app.read_outpaint_chunk_rows(manifest)[0])[0]
+
+        self.assertEqual(accepted["image"], app.rel(edit))
+        self.assertEqual(accepted_frame["image_previous"], app.rel(guide))
+        self.assertEqual(reverted["image"], app.rel(guide))
+        self.assertEqual(reverted_frame["image_previous"], app.rel(edit))
+
     def test_project_save_suggestion_uses_last_browse_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             folder = Path(tmp_text)
@@ -949,6 +1350,25 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertIn("stages", payload)
         self.assertIn("settings", payload)
+
+    def test_media_status_endpoint_reports_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            media_file = Path(tmp_text) / "preview.png"
+            media_file.write_bytes(b"preview")
+            server = app.create_server("127.0.0.1", 0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}/api/media-status?path={urllib.parse.quote(app.rel(media_file))}"
+                with urllib.request.urlopen(url, timeout=5) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["exists"])
+        self.assertGreater(payload["mtime"], 0)
 
     def test_root_serves_static_frontend_shell(self) -> None:
         server = app.create_server("127.0.0.1", 0)

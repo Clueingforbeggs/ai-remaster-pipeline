@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .config import IMAGE_EXTS, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS
 from .manifests import read_manifest, read_manifest_details, update_manifest_row, write_manifest_details
 from .media import extract_video_frame_at
 from .paths import rel, resolve, safe_stem
+from .sam_masks import sam2_mask_for_image
 
 
 def bind_context(context: dict) -> None:
@@ -92,6 +95,9 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
                 "color_reference": row.get("color_reference", ""),
                 "source_reference_mtime": file_mtime(row.get("source_reference", "")),
                 "color_reference_mtime": file_mtime(row.get("color_reference", "")),
+                "recent_color_references": recent_color_references(rows, index),
+                "color_reference_versions": reference_edit_versions(manifest_text, index),
+                "masked_edit_available": bool(APP.settings.get("references", {}).get("masked_workflow", "")),
                 "can_merge_next": index < len(rows) - 1,
                 "can_split": end - start >= 0.1,
                 "can_fade_next": index < len(rows) - 1,
@@ -109,6 +115,204 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
         out.append(item)
         start = end
     return out
+
+def recent_color_references(rows: list[dict[str, str]], row_index: int, limit: int = 8) -> list[str]:
+    previous: list[tuple[int, str]] = []
+    later: list[tuple[int, str]] = []
+    for index, row in enumerate(rows):
+        if index == row_index:
+            continue
+        candidate = row.get("color_reference", "")
+        if not candidate or not resolve(candidate).is_file():
+            continue
+        item = (abs(index - row_index), candidate)
+        if index < row_index:
+            previous.append(item)
+        else:
+            later.append(item)
+    ordered = [path for _distance, path in sorted(previous, key=lambda item: item[0])]
+    ordered.extend(path for _distance, path in sorted(later, key=lambda item: item[0]))
+    return ordered[:limit]
+
+def reference_edit_dir(manifest_text: str, index: int) -> Path:
+    stem = safe_stem(resolve(manifest_text).stem or "references")
+    return ROOT / "intermediate" / "outpainted_references_color_edits" / stem / f"shot_{index:04d}"
+
+def reference_edit_versions(manifest_text: str, index: int, limit: int = 8) -> list[str]:
+    folder = reference_edit_dir(manifest_text, index)
+    if not folder.exists():
+        return []
+    paths = sorted(
+        (path for path in folder.glob("edit_*.png") if path.is_file()),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    return [rel(path) for path in paths[:limit]]
+
+def next_reference_edit_output(manifest_text: str, index: int) -> Path:
+    folder = reference_edit_dir(manifest_text, index)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    base = folder / f"edit_{stamp}.png"
+    if not base.exists() and not base.with_suffix(base.suffix + ".json").exists():
+        return base
+    suffix = 1
+    while True:
+        candidate = folder / f"edit_{stamp}_{suffix:02d}.png"
+        if not candidate.exists() and not candidate.with_suffix(candidate.suffix + ".json").exists():
+            return candidate
+        suffix += 1
+
+def save_reference_edit_mask(manifest_text: str, index: int, mask_data: str) -> str:
+    if not mask_data:
+        return ""
+    import base64
+
+    payload = mask_data.split(",", 1)[1] if "," in mask_data else mask_data
+    raw = base64.b64decode(payload)
+    folder = reference_edit_dir(manifest_text, index)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"mask_{time.strftime('%Y%m%d_%H%M%S')}.png"
+    path.write_bytes(raw)
+    return rel(path)
+
+def reference_edit_prompt(instruction: str, sampled_color: str = "") -> str:
+    parts = [instruction.strip()]
+    color = sampled_color.strip()
+    if color:
+        parts.append(f"Use the sampled colour exactly where relevant: {color}.")
+    prompt = " ".join(part for part in parts if part).strip()
+    return prompt or "Refine this colour reference while preserving the original composition and identity."
+
+def reference_edit_preview_command(manifest_text: str, index: int, instruction: str, mask_data: str = "", sampled_color: str = "") -> tuple[list[str], str]:
+    _manifest, _row, _source, output = reference_row_io(manifest_text, index)
+    current = output
+    if not resolve(current).is_file():
+        raise FileNotFoundError(f"Colour reference does not exist yet: {current}")
+    values = APP.settings.get("references", {})
+    config = current_config()
+    mask = save_reference_edit_mask(manifest_text, index, mask_data)
+    edit_output = next_reference_edit_output(manifest_text, index)
+    prompt = reference_edit_prompt(instruction, sampled_color)
+    comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
+    comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
+    comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
+    if mask:
+        workflow = qwen_masked_workflow_for(values, config)
+        if not workflow:
+            raise RuntimeError("Masked editing needs a Qwen masked edit workflow. ARP's bundled masked workflow was not found, and no custom workflow is set.")
+        if not resolve(workflow).is_file():
+            raise FileNotFoundError(f"Masked edit workflow not found: {workflow}")
+        cmd = [
+            sys.executable,
+            "-u",
+            str(SCRIPTS / "edit_reference_image.py"),
+            "--source-image",
+            current,
+            "--mask",
+            mask,
+            "--output",
+            rel(edit_output),
+            "--workflow",
+            workflow,
+            "--comfy-url",
+            comfy_url,
+            "--comfy-dir",
+            comfy_dir,
+            "--comfy-output-root",
+            comfy_output,
+            "--model-backend",
+            values.get("model_backend", "gguf"),
+            "--gguf-model",
+            values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            "--instruction",
+            prompt,
+            "--force",
+        ]
+    else:
+        workflow = qwen_workflow_for(values, config)
+        cmd = [
+            sys.executable,
+            "-u",
+            str(SCRIPTS / "generate_single_reference.py"),
+            "--source-image",
+            current,
+            "--output",
+            rel(edit_output),
+            "--workflow",
+            workflow,
+            "--comfy-url",
+            comfy_url,
+            "--comfy-dir",
+            comfy_dir,
+            "--comfy-output-root",
+            comfy_output,
+            "--model-backend",
+            values.get("model_backend", "gguf"),
+            "--gguf-model",
+            values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            "--prompt",
+            prompt,
+            "--prompt-suffix",
+            "",
+            "--load-image-node-id",
+            values.get("load_image_node_id", "auto"),
+            "--save-node-id",
+            values.get("save_node_id", "auto"),
+            "--force",
+        ]
+        if values.get("prompt_node_id"):
+            cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    meta = edit_output.with_suffix(edit_output.suffix + ".json")
+    meta.write_text(
+        json.dumps(
+            {
+                "manifest": rel(resolve(manifest_text)),
+                "index": index,
+                "source_image": current,
+                "mask": mask,
+                "instruction": instruction,
+                "sampled_color": sampled_color,
+                "prompt": prompt,
+                "output": rel(edit_output),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return cmd, rel(edit_output)
+
+def accept_reference_edit(manifest_text: str, index: int, preview_path: str) -> dict[str, str]:
+    manifest, row, _source, current = reference_row_io(manifest_text, index)
+    preview = resolve(preview_path)
+    if not preview.is_file():
+        raise FileNotFoundError(f"Edited reference not found: {preview}")
+    update_manifest_row(manifest, index, {"color_reference": rel(preview), "color_reference_previous": current})
+    APP.log.append(f"Accepted edited colour reference for shot {index + 1}: {rel(preview)}")
+    return {"color_reference": rel(preview), "previous": current}
+
+def revert_reference_edit(manifest_text: str, index: int) -> dict[str, str]:
+    manifest, row, _source, current = reference_row_io(manifest_text, index)
+    previous = row.get("color_reference_previous", "")
+    if not previous:
+        versions = reference_edit_versions(manifest_text, index, limit=20)
+        candidates = [path for path in versions if path != current]
+        previous = candidates[0] if candidates else ""
+    if not previous:
+        raise RuntimeError("No previous colour reference is recorded for this shot.")
+    if not resolve(previous).is_file():
+        raise FileNotFoundError(f"Previous colour reference not found: {previous}")
+    update_manifest_row(manifest, index, {"color_reference": previous, "color_reference_previous": current})
+    APP.log.append(f"Reverted edited colour reference for shot {index + 1}: {previous}")
+    return {"color_reference": previous, "previous": current}
+
+def sam_reference_mask(manifest_text: str, index: int, points: list[dict], width: int, height: int, tolerance: int = 10) -> dict[str, str]:
+    _manifest, _row, _source, output = reference_row_io(manifest_text, index)
+    source = resolve(output)
+    if not source.is_file():
+        raise FileNotFoundError(f"Colour reference does not exist yet: {output}")
+    return sam2_mask_for_image(source, points, width, height)
 
 def manifest_fps(path: Path) -> float:
     source = resolve(manifest_source_video(path))

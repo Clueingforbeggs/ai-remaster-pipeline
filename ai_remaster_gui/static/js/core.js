@@ -51,7 +51,7 @@ async function refresh(force = false) {
     return;
   }
 
-  if (!force && !outpaintVisualChanged && active === 'outpaint' && document.getElementById('app')?.children.length) {
+  if (!force && active === 'outpaint' && document.getElementById('app')?.children.length) {
     updateOutpaintGuidePreviews();
     updateOutpaintRawPreviews();
     updateRunLogs();
@@ -117,13 +117,18 @@ function updateSystemStatus() {
   if (!el) return;
   const status = (state && state.system_status) || {};
   const cuda = status.cuda || {};
+  const cpu = status.cpu || {};
+  const gpu = status.gpu || {};
   const ram = status.ram || {};
   const vram = status.vram || {};
   el.innerHTML = [
     statusBadge('CUDA', cuda.available ? 'Yes' : 'No', cuda.available ? 'ok' : 'bad', statusDetail(cuda)),
+    utilizationBadge(cpu, 'CPU'),
+    utilizationBadge(gpu, 'GPU'),
     memoryBadge(ram),
     memoryBadge(vram),
   ].join('');
+  updateStickyOffsets();
 }
 
 function statusBadge(name, value, tone, title) {
@@ -138,6 +143,12 @@ function memoryBadge(item) {
   return statusBadge(match ? match[1] : 'Memory', match ? match[2] : text, tone, statusDetail(item || {}));
 }
 
+function utilizationBadge(item, fallbackName) {
+  const percent = Number(item && item.percent);
+  const tone = Number.isFinite(percent) ? (percent >= 95 ? 'bad' : percent >= 80 ? 'warn' : 'ok') : 'unknown';
+  return statusBadge((item && item.name) || fallbackName, Number.isFinite(percent) ? `${Math.round(percent)}%` : 'Unknown', tone, statusDetail(item || {}));
+}
+
 function statusDetail(item) {
   const details = [];
   if (item.detail) details.push(String(item.detail));
@@ -145,6 +156,14 @@ function statusDetail(item) {
   if (item.cuda) details.push('CUDA ' + item.cuda);
   return details.join(' | ');
 }
+
+function updateStickyOffsets() {
+  const header = document.querySelector('header');
+  if (!header) return;
+  document.documentElement.style.setProperty('--header-height', `${Math.ceil(header.getBoundingClientRect().height)}px`);
+}
+
+window.addEventListener('resize', updateStickyOffsets);
 
 function updateOverviewDynamicStatus() {
   const analysis = state.source_analysis || {};

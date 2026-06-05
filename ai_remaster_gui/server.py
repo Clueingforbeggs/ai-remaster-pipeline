@@ -73,10 +73,15 @@ from .references import (
     parse_time_seconds,
     preview_reference_frame,
     recomposition_output_for,
+    recent_color_references,
     reference_name_for_time,
     openai_reference_regeneration_command,
     reference_regeneration_command,
+    accept_reference_edit,
     regenerate_reference_image,
+    reference_edit_preview_command,
+    revert_reference_edit,
+    sam_reference_mask,
     selected_seconds_from_reference,
     split_manifest_shot,
     shot_rows,
@@ -113,20 +118,24 @@ from .outpaint_guides import (
     _guide_source_seconds,
     _parse_guide_frames,
     _save_guide_frames,
+    accept_guide_edit,
     add_guide_frame,
     chunk_frame_preview,
     clear_guide_frame_image,
+    guide_edit_preview_command,
     guide_frame_generation_command,
     remove_guide_frame,
     outpaint_end_guide_generation_command,
     outpaint_guide_generation_command,
+    revert_guide_edit,
+    sam_guide_mask,
     save_guide_frame,
     save_qwen_input_copy,
     upload_guide_frame_image,
     bind_context as bind_outpaint_guides_context,
 )
 from .cache import cache_state, delete_cache_category, delete_cache_file, human_size, bind_context as bind_cache_context
-from .runtime_settings import APP_VERSION, default_qwen_workflow, load_settings, qwen_workflow_for
+from .runtime_settings import APP_VERSION, default_qwen_workflow, load_settings, qwen_masked_workflow_for, qwen_workflow_for
 from .system_status import system_status
 from .media import (
     aspect_preview,
@@ -175,6 +184,17 @@ from .media import (
 )
 
 MODEL_SIZE_MULTIPLE = 32
+
+
+def combine_outpaint_prompt(prompt: str, suffix: str) -> str:
+    base = (prompt or "").strip()
+    extra = (suffix or "").strip()
+    if not base:
+        return extra
+    if not extra:
+        return base
+    separator = " " if base.endswith((".", "!", "?", ":")) else ". "
+    return f"{base}{separator}{extra}"
 
 
 
@@ -733,7 +753,7 @@ class PipelineApp:
             add(["--target-height", str(resolved_outpaint_height(pipeline_source_text(self.settings), values.get("target_height", "720")))])
             add(["--chunk-seconds", values.get("chunk_seconds", "20")])
             add(["--overlap-frames", values.get("overlap_frames", "8")])
-            add(["--prompt", OUTPAINT_PROMPT])
+            add(["--prompt", values.get("prompt") or OUTPAINT_PROMPT])
             if values.get("negative_prompt"):
                 add(["--negative-prompt", values.get("negative_prompt", "")])
             if values.get("guide_strength"):
@@ -940,6 +960,43 @@ class PipelineApp:
             threading.Thread(target=self._collect_output, args=("references",), daemon=True).start()
         return True, f"Started {provider} reference regeneration for shot {index + 1}."
 
+    def run_reference_edit_preview(self, manifest_text: str, index: int, instruction: str, mask_data: str = "", sampled_color: str = "") -> tuple[bool, str, str]:
+        ok, message = ensure_comfy_available_for_stage("Reference Editing")
+        if not ok:
+            return False, message, ""
+        try:
+            cmd, output = reference_edit_preview_command(manifest_text, index, instruction, mask_data, sampled_color)
+        except Exception as exc:
+            return False, str(exc), ""
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return False, "A command is already running.", output
+            self.running_stage = "Reference Editing"
+            self.running_stage_key = "references"
+            self.running_reference_manifest = manifest_text
+            self.running_reference_index = index
+            self.run_started_at = time.time()
+            mode = "masked" if mask_data else "unmasked"
+            self.log.append(f"Generating {mode} reference edit preview for shot {index + 1}: {output}")
+            self.log.append("> " + redact_command_for_log(cmd))
+            kwargs: dict = {"cwd": ROOT, "text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            try:
+                self.process = subprocess.Popen(cmd, **kwargs)
+            except Exception as exc:
+                self.running_stage = ""
+                self.running_stage_key = ""
+                self.running_reference_manifest = ""
+                self.running_reference_index = None
+                self.run_started_at = 0.0
+                self.log.append(f"Could not start reference edit preview: {exc}")
+                return False, f"Could not start reference edit preview: {exc}", output
+            threading.Thread(target=self._collect_output, args=("references",), daemon=True).start()
+        return True, f"Started reference edit preview for shot {index + 1}.", output
+
     def run_outpaint_end_guide_generation(self, index: int, prompt: str) -> tuple[bool, str]:
         ok, message = ensure_comfy_available_for_stage("End Guide Frame Generation")
         if not ok:
@@ -1053,6 +1110,39 @@ class PipelineApp:
                 daemon=True,
             ).start()
         return True, f"Started Qwen guide frame generation for chunk {chunk_index + 1}, guide {guide_index}."
+
+    def run_guide_edit_preview(self, chunk_index: int, guide_index: int, instruction: str, mask_data: str = "", sampled_color: str = "") -> tuple[bool, str, str]:
+        ok, message = ensure_comfy_available_for_stage("Guide Frame Editing")
+        if not ok:
+            return False, message, ""
+        try:
+            cmd, output = guide_edit_preview_command(chunk_index, guide_index, instruction, mask_data, sampled_color)
+        except Exception as exc:
+            return False, str(exc), ""
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return False, "A command is already running.", output
+            self.running_stage = f"Editing guide frame {guide_index + 1} for chunk {chunk_index + 1}"
+            self.running_stage_key = "outpaint"
+            self.run_started_at = time.time()
+            mode = "masked" if mask_data else "unmasked"
+            self.log.append(f"Generating {mode} guide edit preview (chunk {chunk_index + 1}, guide {guide_index + 1}): {output}")
+            self.log.append("> " + redact_command_for_log(cmd))
+            kwargs: dict = {"cwd": ROOT, "text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            try:
+                self.process = subprocess.Popen(cmd, **kwargs)
+            except Exception as exc:
+                self.running_stage = ""
+                self.running_stage_key = ""
+                self.run_started_at = 0.0
+                self.log.append(f"Could not start guide edit preview: {exc}")
+                return False, f"Could not start guide edit preview: {exc}", output
+            threading.Thread(target=self._collect_output, args=("outpaint",), daemon=True).start()
+        return True, f"Started guide edit preview for chunk {chunk_index + 1}, guide {guide_index + 1}.", output
 
     def _collect_output_guide(self, output: Path, prepared_canvas: Path, source_seconds: float | None = None) -> None:
         """Like _collect_output but composites the guide in-place after a successful Qwen run."""
@@ -1250,6 +1340,15 @@ def outpaint_chunk_manifest_for(source_text: str, values: dict[str, str]) -> str
     return rel(ROOT / "manifests" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}_chunks.csv")
 
 
+def outpaint_chunk_offset_slug(row: dict[str, str]) -> str:
+    try:
+        offset_x = int(float(row.get("offset_x", "0") or 0))
+        offset_y = int(float(row.get("offset_y", "0") or 0))
+    except ValueError:
+        offset_x = offset_y = 0
+    return "" if not (offset_x or offset_y) else f"_ox{offset_x:+d}_oy{offset_y:+d}"
+
+
 def outpaint_prepared_for(source_text: str, values: dict[str, str]) -> Path:
     source = resolve_video_source(source_text)
     aspect = values.get("target_aspect", "16:9")
@@ -1342,11 +1441,16 @@ def outpaint_chunks_state(settings: dict) -> dict:
     manifest = resolve(outpaint_chunk_manifest_for(source_text, values))
     existing = read_outpaint_chunk_rows(manifest)
     ranges = outpaint_chunk_ranges(total_frames, fps, chunk_seconds, overlap_frames, existing)
+    global_prompt = values.get("prompt") or OUTPAINT_PROMPT
+    global_negative = values.get("negative_prompt", "")
     rows = []
     for index, start_frame, end_frame in ranges:
         row = dict(existing.get(index, {}))
-        prepared = chunk_dir / f"prepared_{index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
-        raw = chunk_dir / f"raw_{index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
+        row.setdefault("offset_x", "0")
+        row.setdefault("offset_y", "0")
+        offset_slug = outpaint_chunk_offset_slug(row)
+        prepared = chunk_dir / f"prepared_{index:04d}_{start_frame:06d}_{end_frame:06d}{offset_slug}.mp4"
+        raw = chunk_dir / f"raw_{index:04d}_{start_frame:06d}_{end_frame:06d}{offset_slug}.mp4"
         row.update({
             "chunk_index": str(index),
             "start_frame": str(start_frame),
@@ -1359,7 +1463,7 @@ def outpaint_chunks_state(settings: dict) -> dict:
         row.setdefault("custom_seconds", "")
         if not row.get("seed"):
             row["seed"] = str(42 + index)
-        row["prompt_suffix"] = ""
+        row.setdefault("prompt_suffix", "")
         row.setdefault("negative_suffix", "")
         row.setdefault("guide_image", "")
         row.setdefault("guide_strength", "0.7")
@@ -1398,6 +1502,8 @@ def outpaint_chunks_state(settings: dict) -> dict:
             "raw_start_preview": "",
             "raw_middle_preview": "",
             "raw_end_preview": "",
+            "effective_prompt": combine_outpaint_prompt(global_prompt, row.get("prompt_suffix", "")),
+            "effective_negative_prompt": combine_outpaint_prompt(global_negative, row.get("negative_suffix", "")),
         })
     return {"manifest": rel(manifest), "rows": view_rows}
 
@@ -1431,7 +1537,12 @@ def outpaint_chunk_preview(settings: dict, chunk_index: int, kind: str, position
     if not source_text:
         return ""
     aspect = settings.get("outpaint", {}).get("target_aspect", "16:9")
-    return aspect_preview_at(source_text, aspect, start_seconds + offset)
+    try:
+        offset_x = int(float(row.get("offset_x", "0") or 0))
+        offset_y = int(float(row.get("offset_y", "0") or 0))
+    except ValueError:
+        offset_x = offset_y = 0
+    return aspect_preview_at(source_text, aspect, start_seconds + offset, offset_x, offset_y)
 
 
 
@@ -1487,7 +1598,7 @@ def redact_command_for_log(cmd: list[str]) -> str:
     return " ".join(redacted)
 
 
-def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seconds: str = "", negative_suffix: str = "", guide_strength: str = "", guide_end_strength: str = "", custom_length=None) -> None:
+def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seconds: str = "", negative_suffix: str = "", guide_strength: str = "", guide_end_strength: str = "", custom_length=None, offset_x: str = "0", offset_y: str = "0") -> None:
     state = outpaint_chunks_state(APP.settings)
     manifest_text = state.get("manifest", "")
     if not manifest_text:
@@ -1497,8 +1608,10 @@ def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seco
         raise IndexError(f"Outpaint chunk not found: {index + 1}")
     row = rows[index]
     row["seed"] = str(int(float(seed or row.get("seed") or 42 + index)))
-    row["prompt_suffix"] = ""
+    row["prompt_suffix"] = prompt_suffix
     row["negative_suffix"] = negative_suffix
+    row["offset_x"] = str(int(float(offset_x or 0)))
+    row["offset_y"] = str(int(float(offset_y or 0)))
     use_custom_length = _truthy_payload_value(custom_length) if custom_length is not None else bool(custom_seconds)
     if use_custom_length and custom_seconds:
         row["custom_seconds"] = f"{max(0.1, float(custom_seconds)):.3f}"

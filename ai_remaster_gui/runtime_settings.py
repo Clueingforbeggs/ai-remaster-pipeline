@@ -70,6 +70,10 @@ def default_qwen_workflow(config: dict[str, str]) -> str:
         return rel(sorted(all_matches)[0])
     return ""
 
+def default_qwen_masked_workflow(_config: dict[str, str]) -> str:
+    bundled = ROOT / "workflows" / "qwen_image_edit" / "Image Edit Inpaint (Qwen 2511).json"
+    return rel(bundled) if bundled.is_file() else ""
+
 def should_migrate_qwen_workflow(workflow: str) -> bool:
     if not workflow:
         return True
@@ -102,6 +106,12 @@ def qwen_workflow_for(values: dict[str, str], config: dict[str, str]) -> str:
     if configured and resolve(configured).exists():
         return configured
     return default_workflow
+
+def qwen_masked_workflow_for(values: dict[str, str], config: dict[str, str]) -> str:
+    configured = values.get("masked_workflow", "")
+    if configured and resolve(configured).exists():
+        return configured
+    return default_qwen_masked_workflow(config)
 
 def load_settings() -> dict[str, dict[str, str]]:
     defaults = {stage.key: {key: default for key, _label, _kind, default in stage.fields} for stage in STAGES}
@@ -148,6 +158,8 @@ def load_settings() -> dict[str, dict[str, str]]:
         defaults["references"]["save_node_id"] = "auto"
     defaults["references"].setdefault("model_backend", "gguf")
     defaults["references"].setdefault("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")
+    if not defaults["references"].get("masked_workflow"):
+        defaults["references"]["masked_workflow"] = default_qwen_masked_workflow(config)
     defaults["references"].setdefault("method", "qwen")
     defaults["references"].setdefault("openai_api_key", "")
     defaults["references"].setdefault("openai_image_model", "gpt-image-2")

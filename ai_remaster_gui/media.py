@@ -135,11 +135,11 @@ def aspect_preview_for_settings(settings: dict) -> str:
         seconds,
     )
 
-def aspect_preview_at(source_text: str, aspect: str, seconds: float) -> str:
+def aspect_preview_at(source_text: str, aspect: str, seconds: float, offset_x: int = 0, offset_y: int = 0) -> str:
     signature = source_signature(source_text)
     if signature is None:
         return ""
-    return aspect_preview_cached(signature[0], signature[1], signature[2], aspect, current_crop_values(), round(max(0.0, seconds), 3))
+    return aspect_preview_cached(signature[0], signature[1], signature[2], aspect, current_crop_values(), round(max(0.0, seconds), 3), offset_x, offset_y)
 
 def aspect_preview_at_for_settings(settings: dict, seconds: float) -> str:
     source_text = preview_pipeline_source_text(settings)
@@ -227,20 +227,21 @@ def section_relative_seconds(settings: dict, seconds: float) -> float:
     end = section_float(settings.get("global", {}).get("section_end", ""), 0.0)
     return max(0.0, min(end - start, seconds - start))
 
-def aspect_preview_cached(source_path: str, _size: int, mtime_ns: int, aspect: str, crops: tuple[int, int, int, int], seconds: float) -> str:
+def aspect_preview_cached(source_path: str, _size: int, mtime_ns: int, aspect: str, crops: tuple[int, int, int, int], seconds: float, offset_x: int = 0, offset_y: int = 0) -> str:
     source = Path(source_path)
     source_frame = extract_video_frame_at(source, ASPECT_PREVIEW_DIR / "frames", f"aspect_{int(seconds * 1000):010d}", seconds)
     if not source_frame:
         return ""
     crop_slug = "" if not any(crops) else "_crop" + "-".join(str(v) for v in crops)
-    target = ASPECT_PREVIEW_DIR / f"{safe_preview_name(source)}_{aspect_slug(aspect)}{crop_slug}_{int(seconds * 1000):010d}_v{ASPECT_PREVIEW_STYLE_VERSION}.jpg"
+    offset_slug = "" if not (offset_x or offset_y) else f"_ox{int(offset_x):+d}_oy{int(offset_y):+d}"
+    target = ASPECT_PREVIEW_DIR / f"{safe_preview_name(source)}_{aspect_slug(aspect)}{crop_slug}{offset_slug}_{int(seconds * 1000):010d}_v{ASPECT_PREVIEW_STYLE_VERSION}.jpg"
     if target.exists() and target.stat().st_mtime_ns >= mtime_ns:
         return rel(target)
     try:
         from PIL import Image, ImageOps
     except ModuleNotFoundError:
         APP.log.append("Pillow is not available; using FFmpeg for the aspect preview.")
-        return ffmpeg_aspect_preview(source, target, aspect, mtime_ns) or source_frame
+        return ffmpeg_aspect_preview(source, target, aspect, mtime_ns, offset_x, offset_y) or source_frame
     ratio = parse_aspect(aspect)
     image = Image.open(resolve(source_frame)).convert("RGB")
     width, height = image.size
@@ -255,7 +256,7 @@ def aspect_preview_cached(source_path: str, _size: int, mtime_ns: int, aspect: s
         target_w = width
         target_h = int(round(width / ratio))
     canvas = patterned_canvas(target_w, target_h)
-    paste_xy = ((target_w - width) // 2, (target_h - height) // 2)
+    paste_xy = ((target_w - width) // 2 + int(offset_x), (target_h - height) // 2 + int(offset_y))
     canvas.paste(image, paste_xy)
     draw_source_frame_border(canvas, paste_xy, (width, height))
     preview = ImageOps.contain(canvas, (960, 540), Image.Resampling.LANCZOS)
@@ -292,7 +293,7 @@ def patterned_canvas(width: int, height: int):
         draw.line((offset, 0, offset - height, height), fill=accent, width=max(2, spacing // 10))
     return canvas
 
-def ffmpeg_aspect_preview(source: Path, target: Path, aspect: str, mtime_ns: int) -> str:
+def ffmpeg_aspect_preview(source: Path, target: Path, aspect: str, mtime_ns: int, offset_x: int = 0, offset_y: int = 0) -> str:
     ffmpeg = local_tool("ffmpeg")
     dims = video_dimensions(source)
     if not ffmpeg or not dims:
@@ -310,12 +311,14 @@ def ffmpeg_aspect_preview(source: Path, target: Path, aspect: str, mtime_ns: int
     out_h = max(2, even_int(canvas_h * scale))
     scaled_w = max(2, even_int(source_w * scale))
     scaled_h = max(2, even_int(source_h * scale))
+    scaled_offset_x = int(round(offset_x * scale))
+    scaled_offset_y = int(round(offset_y * scale))
     target.parent.mkdir(parents=True, exist_ok=True)
     filter_text = (
         f"scale={scaled_w}:{scaled_h}[src];"
         f"color=c=0x15272b:s={out_w}x{out_h}[bg];"
         f"[bg]geq=r='34+34*mod(floor((X+Y)/18)\\,2)':g='62+48*mod(floor((X+Y)/18)\\,2)':b='67+40*mod(floor((X+Y)/18)\\,2)'[pat];"
-        f"[pat][src]overlay=(W-w)/2:(H-h)/2"
+        f"[pat][src]overlay=(W-w)/2+{scaled_offset_x}:(H-h)/2+{scaled_offset_y}"
     )
     command = [ffmpeg, "-y", "-ss", "10", "-i", str(source), "-frames:v", "1", "-vf", filter_text, "-q:v", "3", str(target)]
     result = subprocess.run(command, check=False, capture_output=True, text=True)

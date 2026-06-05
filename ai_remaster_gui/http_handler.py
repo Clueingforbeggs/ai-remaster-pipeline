@@ -52,6 +52,22 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/existing-outputs":
             stage = parse_qs(parsed.query).get("stage", [""])[0]
             self.send_json({"paths": APP.existing_outputs(stage) if stage else []})
+        elif parsed.path == "/api/media-status":
+            query = parse_qs(parsed.query)
+            path_text = query.get("path", [""])[0]
+            path = resolve(path_text)
+            exists = path.is_file()
+            self.send_json(
+                {
+                    "ok": True,
+                    "path": path_text,
+                    "exists": exists,
+                    "mtime": path.stat().st_mtime if exists else 0,
+                    "running": APP.process is not None and APP.process.poll() is None,
+                    "running_stage": APP.running_stage,
+                    "log_count": len(APP.log),
+                }
+            )
         elif parsed.path == "/api/comfy":
             url = parse_qs(parsed.query).get("url", ["http://127.0.0.1:8188"])[0].rstrip("/")
             try:
@@ -242,6 +258,61 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 APP.log.append(f"Custom reference install failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/reference-mask-sam":
+            try:
+                result = sam_reference_mask(
+                    str(data.get("manifest", "")),
+                    int(data.get("index", 0)),
+                    data.get("points", []) if isinstance(data.get("points", []), list) else [],
+                    int(data.get("width", 1)),
+                    int(data.get("height", 1)),
+                    int(data.get("tolerance", 10)),
+                )
+                self.send_json({"ok": True, **result})
+            except Exception as exc:
+                APP.log.append(f"Reference smart mask failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/guide-frame-mask-sam":
+            try:
+                result = sam_guide_mask(
+                    int(data.get("chunk_index", 0)),
+                    int(data.get("guide_index", 0)),
+                    data.get("points", []) if isinstance(data.get("points", []), list) else [],
+                    int(data.get("width", 1)),
+                    int(data.get("height", 1)),
+                    str(data.get("fallback_path", "")),
+                )
+                self.send_json({"ok": True, **result})
+            except Exception as exc:
+                APP.log.append(f"Guide smart mask failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/reference-edit-preview":
+            try:
+                ok, message, output = APP.run_reference_edit_preview(
+                    str(data.get("manifest", "")),
+                    int(data.get("index", 0)),
+                    str(data.get("instruction", "")),
+                    str(data.get("mask", "")),
+                    str(data.get("sampled_color", "")),
+                )
+                self.send_json({"ok": ok, "message": message, "preview": output, "state": APP.state("references") if ok else None, "error": "" if ok else message})
+            except Exception as exc:
+                APP.log.append(f"Reference edit preview failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/reference-edit-accept":
+            try:
+                result = accept_reference_edit(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("preview", "")))
+                self.send_json({"ok": True, **result, "state": APP.state("references")})
+            except Exception as exc:
+                APP.log.append(f"Reference edit accept failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/reference-edit-revert":
+            try:
+                result = revert_reference_edit(str(data.get("manifest", "")), int(data.get("index", 0)))
+                self.send_json({"ok": True, **result, "state": APP.state("references")})
+            except Exception as exc:
+                APP.log.append(f"Reference edit revert failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/export-media":
             try:
                 result = export_media_file(str(data.get("path", "")))
@@ -251,14 +322,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/outpaint-chunk":
             try:
-                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None))
+                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0")))
                 self.send_json({"ok": True, "state": APP.state("outpaint")})
             except Exception as exc:
                 APP.log.append(f"Outpaint chunk save failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/outpaint-chunk-regenerate":
             try:
-                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None))
+                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0")))
                 ok, message = APP.run_outpaint_chunk(int(data.get("index", 0)))
                 self.send_json({"ok": ok, "message": message, "state": APP.state("outpaint") if ok else None, "error": "" if ok else message})
             except Exception as exc:
@@ -358,6 +429,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": ok, "message": message, "state": APP.state("outpaint") if ok else None, "error": "" if ok else message})
             except Exception as exc:
                 APP.log.append(f"Guide frame generation failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/guide-frame-edit-preview":
+            try:
+                ok, message, preview = APP.run_guide_edit_preview(
+                    int(data.get("chunk_index", 0)),
+                    int(data.get("guide_index", 0)),
+                    str(data.get("instruction", "")),
+                    str(data.get("mask", "")),
+                    str(data.get("sampled_color", "")),
+                )
+                self.send_json({"ok": ok, "message": message, "preview": preview, "state": APP.state("outpaint") if ok else None, "error": "" if ok else message})
+            except Exception as exc:
+                APP.log.append(f"Guide frame edit preview failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/guide-frame-edit-accept":
+            try:
+                result = accept_guide_edit(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), str(data.get("preview", "")))
+                self.send_json({"ok": True, **result, "state": APP.state("outpaint")})
+            except Exception as exc:
+                APP.log.append(f"Guide frame edit accept failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/guide-frame-edit-revert":
+            try:
+                result = revert_guide_edit(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)))
+                self.send_json({"ok": True, **result, "state": APP.state("outpaint")})
+            except Exception as exc:
+                APP.log.append(f"Guide frame edit revert failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/browse":
             try:

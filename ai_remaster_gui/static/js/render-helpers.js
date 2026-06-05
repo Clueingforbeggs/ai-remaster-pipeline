@@ -91,9 +91,27 @@ function selectOptionLabel(key, option) {
 
 function rangeFieldHtml(key, label, kind, value) {
   const [min, max, step] = kind.slice(6).split('|');
+  const isCrop = key.startsWith('crop_');
+  const controls = isCrop ? `
+    <div class="pixel-nudge-row">
+      <button type="button" onclick="nudgeRangeField('${key}',-1)">-1</button>
+      <input
+        id="${key}Input"
+        class="pixel-input"
+        type="number"
+        min="${esc(min)}"
+        max="${esc(max)}"
+        step="${esc(step || '1')}"
+        value="${esc(value)}"
+        onchange="setRangeFieldValue('${key}',this.value,true)"
+      >
+      <button type="button" onclick="nudgeRangeField('${key}',1)">+1</button>
+    </div>
+  ` : '';
   return `
     <label>${label}: <span id="${key}Value">${esc(value)}</span></label>
     <input
+      id="${key}Range"
       data-field="${key}"
       data-kind="${kind}"
       type="range"
@@ -101,9 +119,34 @@ function rangeFieldHtml(key, label, kind, value) {
       max="${esc(max)}"
       step="${esc(step || '1')}"
       value="${esc(value)}"
-      oninput="document.getElementById('${key}Value').textContent=this.value"
+      oninput="setRangeFieldValue('${key}',this.value,false)"
     >
+    ${controls}
   `;
+}
+
+function setRangeFieldValue(key, value, save = false) {
+  const range = document.getElementById(`${key}Range`);
+  if (!range) return;
+  const min = Number(range.min || 0);
+  const max = Number(range.max || value);
+  const step = Number(range.step || 1);
+  let next = Number(value);
+  if (!Number.isFinite(next)) next = Number(range.value || 0);
+  next = Math.max(min, Math.min(max, Math.round(next / step) * step));
+  range.value = String(next);
+  const label = document.getElementById(`${key}Value`);
+  if (label) label.textContent = range.value;
+  const input = document.getElementById(`${key}Input`);
+  if (input) input.value = range.value;
+  if (save) range.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function nudgeRangeField(key, delta) {
+  const range = document.getElementById(`${key}Range`);
+  if (!range) return;
+  const step = Number(range.step || 1);
+  setRangeFieldValue(key, Number(range.value || 0) + Number(delta || 0) * step, true);
 }
 
 function aspectPreviewHtml(st) {
@@ -145,6 +188,9 @@ function aspectPreviewSlider(range) {
 
 function outpaintOverlapWarning(s) {
   const warnings = [];
+  if (!String(s.prompt || '').toLowerCase().includes('outpaint')) {
+    warnings.push('The global Outpainting prompt does not contain "outpaint". The LTX IC-LoRA usually needs that word to activate.');
+  }
   const overlap = Number(s.overlap_frames ?? 8);
   const chunkSeconds = Number(s.chunk_seconds ?? 20);
   if (Number.isFinite(overlap) && overlap < 8) {

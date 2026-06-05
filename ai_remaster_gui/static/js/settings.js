@@ -32,6 +32,8 @@ function qwenSettingsHtml(refs) {
     <h3>Qwen Reference Generation</h3>
     <label>Workflow</label>
     <input value="${esc(refs.workflow || '')}" readonly>
+    <label>Masked edit workflow</label>
+    <input id="qwenMaskedWorkflow" value="${esc(refs.masked_workflow || '')}" placeholder="Bundled Qwen inpaint workflow JSON">
     <label>Model backend</label>
     <input value="${esc(refs.model_backend || 'gguf')}" readonly>
     <label>GGUF model</label>
@@ -40,6 +42,9 @@ function qwenSettingsHtml(refs) {
     <textarea readonly>${esc(refs.prompt || '')}</textarea>
     <label>Prompt suffix</label>
     <textarea readonly>${esc(refs.prompt_suffix || '')}</textarea>
+    <div class="actions">
+      <button type="button" class="primary" onclick="saveQwenEditSettings()">Save Qwen Edit Settings</button>
+    </div>
   `;
 }
 
@@ -122,6 +127,16 @@ async function saveOpenAISettings() {
       openai_image_model: document.getElementById('openaiImageModel')?.value || 'gpt-image-2',
       openai_image_size: document.getElementById('openaiImageSize')?.value || 'auto',
       openai_image_quality: document.getElementById('openaiImageQuality')?.value || 'auto',
+    },
+  });
+  state = await api(stateUrl());
+}
+
+async function saveQwenEditSettings() {
+  await postJson('/api/settings', {
+    stage: 'references',
+    values: {
+      masked_workflow: document.getElementById('qwenMaskedWorkflow')?.value || '',
     },
   });
   state = await api(stateUrl());

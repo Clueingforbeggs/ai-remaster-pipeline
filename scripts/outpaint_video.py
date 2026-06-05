@@ -646,6 +646,33 @@ def newest_output(files: list[Path]) -> Path:
     return newest_comfy_output(files, videos if any(path.suffix.lower() in videos for path in files) else None, "output file")
 
 
+def black_margin_warning(video: Path, sample_frame: int = 20, side_fraction: float = 0.125) -> str:
+    import cv2
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return ""
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, min(sample_frame, max(0, frame_count - 1))))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        return ""
+
+    height, width = frame.shape[:2]
+    side_width = max(1, int(width * side_fraction))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    left_black = float((gray[:, :side_width] < 16).mean())
+    right_black = float((gray[:, -side_width:] < 16).mean())
+    if left_black > 0.9 and right_black > 0.9:
+        return (
+            f"Warning: {video.name} still has mostly black side margins after Comfy "
+            f"(left {left_black:.0%}, right {right_black:.0%} below luma 16). "
+            "The LTX outpaint job appears to have preserved the padding instead of filling it."
+        )
+    return ""
+
+
 def chunk_ranges(prepared: Path, chunk_seconds: float, overlap_frames: int) -> list[tuple[int, int, int]]:
     info = probe_video(prepared)
     total_frames = int(info["frames"])
@@ -668,7 +695,14 @@ def chunk_ranges(prepared: Path, chunk_seconds: float, overlap_frames: int) -> l
 
 
 def combine_prompt(prompt: str, suffix: str) -> str:
-    return " ".join(part.strip() for part in (prompt, suffix) if part and part.strip())
+    base = (prompt or "").strip()
+    extra = (suffix or "").strip()
+    if not base:
+        return extra
+    if not extra:
+        return base
+    separator = " " if base.endswith((".", "!", "?", ":")) else ". "
+    return f"{base}{separator}{extra}"
 
 
 def default_chunk_manifest(source: Path, aspect: str, width: int, height: int, args) -> Path:
@@ -701,6 +735,8 @@ def write_chunk_manifest(path: Path, rows: list[dict[str, str]]) -> None:
         "start_seconds",
         "end_seconds",
         "custom_seconds",
+        "offset_x",
+        "offset_y",
         "seed",
         "prompt_suffix",
         "negative_suffix",
@@ -762,6 +798,9 @@ def sync_chunk_manifest(path: Path, ranges: list[tuple[int, int, int]], fps: flo
     rows: list[dict[str, str]] = []
     for chunk_index, start_frame, end_frame in ranges:
         row = dict(existing.get(chunk_index, {}))
+        offset_x = int(float(row.get("offset_x", "0") or 0))
+        offset_y = int(float(row.get("offset_y", "0") or 0))
+        offset_slug = "" if not (offset_x or offset_y) else f"_ox{offset_x:+d}_oy{offset_y:+d}"
         row.update(
             {
                 "chunk_index": str(chunk_index),
@@ -769,13 +808,15 @@ def sync_chunk_manifest(path: Path, ranges: list[tuple[int, int, int]], fps: flo
                 "end_frame": str(end_frame),
                 "start_seconds": f"{start_frame / fps:.6f}",
                 "end_seconds": f"{end_frame / fps:.6f}",
-                "prepared_path": root_relative(chunk_dir / f"prepared_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"),
-                "raw_path": root_relative(chunk_dir / f"raw_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"),
+                "prepared_path": root_relative(chunk_dir / f"prepared_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}{offset_slug}.mp4"),
+                "raw_path": root_relative(chunk_dir / f"raw_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}{offset_slug}.mp4"),
             }
         )
+        row["offset_x"] = str(offset_x)
+        row["offset_y"] = str(offset_y)
         if not row.get("seed"):
             row["seed"] = str(default_seed + chunk_index)
-        row["prompt_suffix"] = ""
+        row.setdefault("prompt_suffix", "")
         row.setdefault("negative_suffix", "")
         row.setdefault("guide_image", "")
         row.setdefault("custom_seconds", "")
@@ -784,12 +825,29 @@ def sync_chunk_manifest(path: Path, ranges: list[tuple[int, int, int]], fps: flo
     return {int(row["chunk_index"]): row for row in rows}
 
 
-def split_chunk(ffmpeg: str, prepared: Path, chunk_path: Path, start_frame: int, end_frame: int, fps: float, force: bool) -> None:
+def split_chunk(ffmpeg: str, prepared: Path, chunk_path: Path, start_frame: int, end_frame: int, fps: float, force: bool, offset_x: int = 0, offset_y: int = 0) -> None:
     if chunk_path.exists() and not force:
         return
     chunk_path.parent.mkdir(parents=True, exist_ok=True)
     partial = chunk_path.with_suffix(chunk_path.suffix + ".partial" + chunk_path.suffix)
-    vf = f"trim=start_frame={start_frame}:end_frame={end_frame},setpts=N/({fps:.8f}*TB),fps={fps:.8f},setsar=1"
+    trim = f"trim=start_frame={start_frame}:end_frame={end_frame},setpts=N/({fps:.8f}*TB),fps={fps:.8f},setsar=1"
+    if offset_x or offset_y:
+        info = probe_video(prepared)
+        width = int(info["width"])
+        height = int(info["height"])
+        pad_width = width + abs(int(offset_x))
+        pad_height = height + abs(int(offset_y))
+        pad_x = max(0, int(offset_x))
+        pad_y = max(0, int(offset_y))
+        crop_x = max(0, -int(offset_x))
+        crop_y = max(0, -int(offset_y))
+        vf = (
+            f"{trim},"
+            f"pad={pad_width}:{pad_height}:{pad_x}:{pad_y}:black,"
+            f"crop={width}:{height}:{crop_x}:{crop_y},setsar=1"
+        )
+    else:
+        vf = trim
     subprocess.run([ffmpeg, "-y", "-i", str(prepared), "-vf", vf, "-an", "-r", f"{fps:.8f}", "-fps_mode", "cfr", "-c:v", "libx264", "-crf", "12", "-preset", "veryfast", str(partial)], check=True)
     replace_with_retry(partial, chunk_path, f"Prepared chunk {chunk_path.name}")
 
@@ -1076,13 +1134,15 @@ def main() -> int:
             raw_chunks: list[Path] = []
             effective_ranges: list[tuple[int, int, int]] = []
             for range_index, (chunk_index, start_frame, end_frame) in enumerate(ranges):
-                chunk_prepared = chunk_dir / f"prepared_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
-                chunk_raw = chunk_dir / f"raw_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
+                chunk_row = chunk_overrides.get(chunk_index, {})
+                chunk_offset_x = int(float(chunk_row.get("offset_x", "0") or 0))
+                chunk_offset_y = int(float(chunk_row.get("offset_y", "0") or 0))
+                chunk_prepared = resolve_path(chunk_row.get("prepared_path", "")) if chunk_row.get("prepared_path") else chunk_dir / f"prepared_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
+                chunk_raw = resolve_path(chunk_row.get("raw_path", "")) if chunk_row.get("raw_path") else chunk_dir / f"raw_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
                 print(f"Outpaint chunk {chunk_index + 1}/{len(ranges)}: frames {start_frame}-{end_frame}", flush=True)
                 force_this_split = args.force and (args.only_chunk is None or chunk_index == args.only_chunk)
-                split_chunk(ffmpeg, prepared, chunk_prepared, start_frame, end_frame, float(prepared_info["fps"] or 24.0), force_this_split)
+                split_chunk(ffmpeg, prepared, chunk_prepared, start_frame, end_frame, float(prepared_info["fps"] or 24.0), force_this_split, chunk_offset_x, chunk_offset_y)
                 previous_raw = raw_chunks[-1] if raw_chunks else None
-                chunk_row = chunk_overrides.get(chunk_index, {})
                 chunk_seed = int(chunk_row.get("seed") or args.seed + chunk_index)
                 chunk_prompt_suffix = chunk_row.get("prompt_suffix", "")
                 chunk_negative_suffix = chunk_row.get("negative_suffix", "")
@@ -1161,6 +1221,8 @@ def main() -> int:
                 prompt_text = combine_prompt(args.prompt, chunk_prompt_suffix)
                 negative_text = combine_prompt(args.negative_prompt, chunk_negative_suffix)
                 print(f"Chunk {chunk_index + 1} seed: {chunk_seed}", flush=True)
+                print(f"Chunk {chunk_index + 1} positive prompt sent to Comfy: {json.dumps(prompt_text, ensure_ascii=False)}", flush=True)
+                print(f"Chunk {chunk_index + 1} negative prompt sent to Comfy: {json.dumps(negative_text, ensure_ascii=False)}", flush=True)
                 if chunk_prompt_suffix:
                     print(f"Chunk {chunk_index + 1} prompt suffix: {chunk_prompt_suffix}", flush=True)
                 if chunk_negative_suffix:
@@ -1181,6 +1243,9 @@ def main() -> int:
                 replace_with_retry(chunk_tmp, chunk_raw, f"Outpaint chunk {chunk_index + 1}")
                 write_signature(chunk_raw, chunk_sig)
                 print(f"Wrote raw Comfy chunk: {chunk_raw}", flush=True)
+                warning = black_margin_warning(chunk_raw)
+                if warning:
+                    print(warning, flush=True)
                 raw_chunks.append(chunk_raw)
                 effective_ranges.append((chunk_index, start_frame, end_frame))
             restitched = True

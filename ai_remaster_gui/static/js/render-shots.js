@@ -320,7 +320,7 @@ function referenceCard(context) {
       </div>
       <div>
         <label>Color reference</label>
-        ${colorReady ? colorReferenceThumb(manifest, idx, colorUrl) : missingImage('Image not present')}
+        ${colorReady ? colorReferenceThumb(manifest, idx, colorUrl, row) : missingImage('Image not present')}
       </div>
       <div>${referencePromptTools(context)}</div>
     </article>
@@ -383,10 +383,11 @@ function referenceTimeControl(manifest, row, idx, slider, label, img) {
   `;
 }
 
-function colorReferenceThumb(manifest, idx, colorUrl) {
+function colorReferenceThumb(manifest, idx, colorUrl, row) {
   return `
     <div class="thumb-wrap">
-      <img src="${colorUrl}" alt="" onclick="openImageModal(this.src,${jsArg('Color reference')})">
+      <img src="${colorUrl}" alt="" onclick="openReferenceEditor('${esc(manifest)}',${idx})" title="Open advanced reference editor">
+      ${(row.color_reference_versions || []).length ? '<span class="edit-badge">Edited</span>' : ''}
       <button class="icon-button" type="button" title="Delete color reference" onclick="deleteReference('${esc(manifest)}',${idx})">&#128465;</button>
     </div>
   `;

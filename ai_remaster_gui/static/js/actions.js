@@ -64,6 +64,8 @@ function outpaintChunkForm(index) {
     seed: document.getElementById(`chunkSeed_${index}`).value,
     custom_length: !!(customCheckbox && customCheckbox.checked),
     custom_seconds: outpaintChunkCustomSeconds(index),
+    offset_x: document.getElementById(`chunkOffset_x_${index}`)?.value || '0',
+    offset_y: document.getElementById(`chunkOffset_y_${index}`)?.value || '0',
     prompt_suffix: document.getElementById(`chunkPrompt_${index}`).value,
     negative_suffix: document.getElementById(`chunkNegative_${index}`).value,
   };
@@ -101,6 +103,520 @@ function closeImageModal() {
   if (img) img.removeAttribute('src');
 }
 
+const referenceEditor = {
+  mode: 'reference',
+  manifest: '',
+  index: -1,
+  chunkIndex: -1,
+  guideIndex: -1,
+  row: null,
+  guide: null,
+  guideSourcePath: '',
+  tool: 'brush-add',
+  brushSize: 28,
+  sampledColor: '',
+  samPoints: [],
+  drawing: false,
+  preview: '',
+  previewPollTimer: null,
+  previewPollStartedAt: 0,
+};
+
+function openReferenceEditor(manifest, index) {
+  const rows = (state.shot_views && state.shot_views.references) || [];
+  const row = rows[index];
+  if (!row || !row.color_reference) return;
+  referenceEditor.mode = 'reference';
+  referenceEditor.manifest = manifest;
+  referenceEditor.index = index;
+  referenceEditor.chunkIndex = -1;
+  referenceEditor.guideIndex = -1;
+  referenceEditor.row = row;
+  referenceEditor.guide = null;
+  referenceEditor.guideSourcePath = '';
+  referenceEditor.preview = '';
+  referenceEditor.samPoints = [];
+  ensureReferenceEditorModal();
+  document.getElementById('referenceEditTitle').textContent = `Shot ${index + 1} Reference Editor`;
+  document.getElementById('referenceEditInstruction').value = row.prompt || '';
+  document.getElementById('referenceEditSample').textContent = 'No colour sampled';
+  document.getElementById('referenceEditPreview').innerHTML = missingImage('No preview yet');
+  document.getElementById('referenceEditRecent').innerHTML = referenceRecentHtml(row);
+  document.getElementById('referenceEditModal').classList.remove('hidden');
+  setReferenceTool(referenceEditor.tool);
+  loadReferenceEditorImage(media(row.color_reference) + '&t=' + (row.color_reference_mtime || Date.now()));
+}
+
+function openGuideEditor(chunkIndex, guideIndex, fallbackPath = '') {
+  const rows = (state.outpaint_chunks && state.outpaint_chunks.rows) || [];
+  const row = rows.find(item => Number(item.index) === Number(chunkIndex));
+  const guide = row && (row.guides || [])[guideIndex];
+  if (!row || !guide) return;
+  const srcPath = guide.image_exists ? guide.image : (guide.source_preview || fallbackPath);
+  if (!srcPath) return alert('Guide preview is still loading.');
+  referenceEditor.mode = 'guide';
+  referenceEditor.manifest = '';
+  referenceEditor.index = -1;
+  referenceEditor.chunkIndex = chunkIndex;
+  referenceEditor.guideIndex = guideIndex;
+  referenceEditor.row = row;
+  referenceEditor.guide = guide;
+  referenceEditor.guideSourcePath = srcPath;
+  referenceEditor.preview = '';
+  referenceEditor.samPoints = [];
+  ensureReferenceEditorModal();
+  document.getElementById('referenceEditTitle').textContent = `Chunk ${chunkIndex + 1} Guide ${guideIndex + 1} Editor`;
+  document.getElementById('referenceEditInstruction').value = 'Inpaint the masked area. Preserve the rest of the image.';
+  document.getElementById('referenceEditSample').textContent = 'No colour sampled';
+  document.getElementById('referenceEditPreview').innerHTML = missingImage('No preview yet');
+  document.getElementById('referenceEditRecent').innerHTML = guideRecentHtml(row, guideIndex);
+  document.getElementById('referenceEditModal').classList.remove('hidden');
+  setReferenceTool(referenceEditor.tool);
+  loadReferenceEditorImage(media(srcPath) + '&t=' + (guide.image_mtime || Date.now()));
+}
+
+function referenceIcon(name) {
+  const common = 'viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
+  const plus = '<path d="M18 15v6M15 18h6"/>';
+  const minus = '<path d="M15 18h6"/>';
+  const icons = {
+    'sam-add': `<svg ${common}><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/><path d="M9.5 12h5M12 9.5v5"/>${plus}</svg>`,
+    'sam-subtract': `<svg ${common}><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/><path d="M9.5 12h5"/>${minus}</svg>`,
+    'brush-add': `<svg ${common}><path d="M14 4l6 6-8.5 8.5c-1.2 1.2-3.1 1.2-4.2 0l-1.8-1.8c-1.2-1.2-1.2-3.1 0-4.2L14 4z"/><path d="M13 5l6 6"/><path d="M4 20c1.7.2 3-.2 4-1.2"/>${plus}</svg>`,
+    'brush-subtract': `<svg ${common}><path d="M14 4l6 6-8.5 8.5c-1.2 1.2-3.1 1.2-4.2 0l-1.8-1.8c-1.2-1.2-1.2-3.1 0-4.2L14 4z"/><path d="M13 5l6 6"/><path d="M4 20c1.7.2 3-.2 4-1.2"/>${minus}</svg>`,
+    wand: `<svg ${common}><path d="M4 20l10-10"/><path d="M13 5l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3z"/><path d="M18 3v3M20 5h-4M6 5v2M7 6H5"/></svg>`,
+    dropper: `<svg ${common}><path d="M14 5l5 5"/><path d="M11 8l5 5-7.5 7.5H4v-4.5L11 8z"/><path d="M13 6l2-2c.8-.8 2.2-.8 3 0l2 2c.8.8.8 2.2 0 3l-2 2"/></svg>`,
+    clear: `<svg ${common}><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v5M14 11v5"/></svg>`,
+    invert: `<svg ${common}><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z"/></svg>`,
+  };
+  return icons[name] || '';
+}
+
+function referenceToolButton(tool, label) {
+  return `<button class="reference-tool-button" type="button" data-tool="${tool}" title="${label}" aria-label="${label}" onclick="setReferenceTool('${tool}')">${referenceIcon(tool)}<span class="sr-only">${label}</span></button>`;
+}
+
+function referenceMaskActionButton(action, icon, label) {
+  return `<button class="reference-tool-button" type="button" title="${label}" aria-label="${label}" onclick="${action}">${referenceIcon(icon)}<span class="sr-only">${label}</span></button>`;
+}
+
+function ensureReferenceEditorModal() {
+  if (document.getElementById('referenceEditModal')) return;
+  const modal = document.createElement('div');
+  modal.id = 'referenceEditModal';
+  modal.className = 'image-modal hidden';
+  modal.innerHTML = `
+    <div class="image-modal-backdrop" onclick="closeReferenceEditor()"></div>
+    <div class="reference-editor-panel">
+      <div class="image-modal-heading">
+        <strong id="referenceEditTitle"></strong>
+        <button type="button" onclick="closeReferenceEditor()">Close</button>
+      </div>
+      <div class="reference-editor-layout">
+        <div class="reference-canvas-wrap">
+          <canvas id="referenceImageCanvas"></canvas>
+          <canvas id="referenceMaskCanvas"></canvas>
+        </div>
+        <aside class="reference-editor-tools">
+          <label>Instruction</label>
+          <textarea id="referenceEditInstruction" placeholder="make the selected coat green"></textarea>
+          <div class="reference-tool-grid">
+            ${referenceToolButton('sam-add', 'SAM2 add to mask')}
+            ${referenceToolButton('brush-add', 'Brush add to mask')}
+            ${referenceToolButton('wand', 'Magic wand selection')}
+            ${referenceToolButton('sam-subtract', 'SAM2 subtract from mask')}
+            ${referenceToolButton('brush-subtract', 'Brush subtract from mask')}
+            ${referenceToolButton('dropper', 'Sample colour')}
+          </div>
+          <label>Brush size</label>
+          <input id="referenceBrushSize" type="range" min="4" max="120" value="28" oninput="referenceEditor.brushSize=Number(this.value)">
+          <div class="reference-mask-actions">
+            ${referenceMaskActionButton('clearReferenceMask()', 'clear', 'Clear mask')}
+            ${referenceMaskActionButton('invertReferenceMask()', 'invert', 'Invert mask')}
+          </div>
+          <div class="sample-row"><span id="referenceSampleSwatch"></span><span id="referenceEditSample">No colour sampled</span></div>
+          <label>Recent reference images</label>
+          <div id="referenceEditRecent" class="recent-reference-strip"></div>
+          <div class="actions">
+            <button class="primary" type="button" onclick="submitReferenceEditPreview()">Apply with Qwen</button>
+            <button type="button" onclick="acceptReferenceEditPreview()">Accept</button>
+            <button type="button" onclick="revertReferenceEdit()">Revert</button>
+          </div>
+          <div id="referenceEditStatus" class="shot-empty"></div>
+          <label>Preview</label>
+          <div id="referenceEditPreview"></div>
+        </aside>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  wireReferenceEditorCanvas();
+}
+
+function referenceRecentHtml(row) {
+  const paths = row.recent_color_references || [];
+  if (!paths.length) return '<p class="shot-empty">No nearby colour references yet.</p>';
+  return paths.map(path => `<img src="${media(path)}" alt="" title="${esc(path)}" onclick="sampleReferenceImageColor(event,this)">`).join('');
+}
+
+function guideRecentHtml(row, guideIndex) {
+  const guides = (row.guides || []).filter((guide, index) => index !== guideIndex);
+  const paths = guides.map(guide => guide.image_exists ? guide.image : guide.source_preview).filter(Boolean);
+  if (!paths.length) return '<p class="shot-empty">No nearby guide previews yet.</p>';
+  return paths.map(path => `<img src="${media(path)}" alt="" title="${esc(path)}" onclick="sampleReferenceImageColor(event,this)">`).join('');
+}
+
+function closeReferenceEditor() {
+  stopReferencePreviewPolling();
+  const modal = document.getElementById('referenceEditModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function stopReferencePreviewPolling() {
+  if (referenceEditor.previewPollTimer) {
+    clearTimeout(referenceEditor.previewPollTimer);
+    referenceEditor.previewPollTimer = null;
+  }
+}
+
+function loadReferenceEditorImage(src) {
+  const img = new Image();
+  img.onload = () => {
+    const imageCanvas = document.getElementById('referenceImageCanvas');
+    const maskCanvas = document.getElementById('referenceMaskCanvas');
+    const maxSide = 1400;
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h = Math.max(1, Math.round(img.naturalHeight * scale));
+    for (const canvas of [imageCanvas, maskCanvas]) {
+      canvas.width = w;
+      canvas.height = h;
+      canvas.style.aspectRatio = `${w}/${h}`;
+    }
+    imageCanvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    clearReferenceMask();
+  };
+  img.src = src;
+}
+
+function wireReferenceEditorCanvas() {
+  const canvas = document.getElementById('referenceMaskCanvas');
+  canvas.addEventListener('pointerdown', event => {
+    referenceEditor.drawing = true;
+    handleReferenceCanvasPoint(event);
+  });
+  canvas.addEventListener('pointermove', event => {
+    if (!referenceEditor.drawing) return;
+    if (!referenceEditor.tool.startsWith('brush')) return;
+    handleReferenceCanvasPoint(event);
+  });
+  window.addEventListener('pointerup', () => { referenceEditor.drawing = false; });
+}
+
+function setReferenceTool(tool) {
+  referenceEditor.tool = tool;
+  document.querySelectorAll('.reference-tool-button[data-tool]').forEach(button => {
+    button.classList.toggle('active', button.dataset.tool === tool);
+  });
+  const labels = {
+    'sam-add': 'SAM2 add to mask',
+    'sam-subtract': 'SAM2 subtract from mask',
+    'brush-add': 'Brush add to mask',
+    'brush-subtract': 'Brush subtract from mask',
+    wand: 'Magic wand selection',
+    dropper: 'Sample colour',
+  };
+  const status = document.getElementById('referenceEditStatus');
+  if (status) status.textContent = `Tool: ${labels[tool] || tool}`;
+}
+
+function referenceCanvasPoint(event) {
+  const canvas = document.getElementById('referenceMaskCanvas');
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: Math.max(0, Math.min(canvas.width, (event.clientX - rect.left) * canvas.width / rect.width)),
+    y: Math.max(0, Math.min(canvas.height, (event.clientY - rect.top) * canvas.height / rect.height)),
+  };
+}
+
+function handleReferenceCanvasPoint(event) {
+  const point = referenceCanvasPoint(event);
+  if (referenceEditor.tool === 'dropper') return sampleActiveReferenceColor(point.x, point.y);
+  if (referenceEditor.tool === 'wand') return wandReferenceMask(point.x, point.y, 34);
+  if (referenceEditor.tool === 'sam-add' || referenceEditor.tool === 'sam-subtract') return requestReferenceSamMask(point);
+  drawReferenceBrush(point.x, point.y, referenceEditor.tool === 'brush-subtract');
+}
+
+function drawReferenceBrush(x, y, subtract) {
+  const ctx = document.getElementById('referenceMaskCanvas').getContext('2d');
+  ctx.save();
+  ctx.globalCompositeOperation = subtract ? 'destination-out' : 'source-over';
+  ctx.fillStyle = 'rgba(45,143,125,.58)';
+  ctx.beginPath();
+  ctx.arc(x, y, referenceEditor.brushSize / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function clearReferenceMask() {
+  const canvas = document.getElementById('referenceMaskCanvas');
+  if (!canvas) return;
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function invertReferenceMask() {
+  const canvas = document.getElementById('referenceMaskCanvas');
+  const ctx = canvas.getContext('2d');
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < data.data.length; i += 4) {
+    const on = data.data[i + 3] > 0;
+    data.data[i] = 45;
+    data.data[i + 1] = 143;
+    data.data[i + 2] = 125;
+    data.data[i + 3] = on ? 0 : 148;
+  }
+  ctx.putImageData(data, 0, 0);
+}
+
+function sampleActiveReferenceColor(x, y) {
+  const canvas = document.getElementById('referenceImageCanvas');
+  const data = canvas.getContext('2d').getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
+  setReferenceSample(rgbToHex(data[0], data[1], data[2]));
+}
+
+function sampleReferenceImageColor(event, img) {
+  const rect = img.getBoundingClientRect();
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth || img.width;
+  canvas.height = img.naturalHeight || img.height;
+  const ctx = canvas.getContext('2d');
+  try {
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const x = Math.floor((event.clientX - rect.left) * canvas.width / rect.width);
+    const y = Math.floor((event.clientY - rect.top) * canvas.height / rect.height);
+    const data = ctx.getImageData(x, y, 1, 1).data;
+    setReferenceSample(rgbToHex(data[0], data[1], data[2]));
+  } catch {
+    document.getElementById('referenceEditStatus').textContent = 'Could not sample that image.';
+  }
+}
+
+function setReferenceSample(hex) {
+  referenceEditor.sampledColor = hex;
+  document.getElementById('referenceEditSample').textContent = hex;
+  document.getElementById('referenceSampleSwatch').style.background = hex;
+  const instruction = document.getElementById('referenceEditInstruction');
+  if (instruction && !instruction.value.includes(hex)) {
+    instruction.value = `${instruction.value.trim()} use ${hex}`.trim();
+  }
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
+}
+
+function wandReferenceMask(x, y, tolerance = 34) {
+  const image = document.getElementById('referenceImageCanvas');
+  const mask = document.getElementById('referenceMaskCanvas');
+  const imageCtx = image.getContext('2d');
+  const maskCtx = mask.getContext('2d');
+  const pixels = imageCtx.getImageData(0, 0, image.width, image.height);
+  const out = maskCtx.getImageData(0, 0, mask.width, mask.height);
+  const sx = Math.floor(x), sy = Math.floor(y);
+  const idx = (sy * image.width + sx) * 4;
+  const target = [pixels.data[idx], pixels.data[idx + 1], pixels.data[idx + 2]];
+  const seen = new Uint8Array(image.width * image.height);
+  const stack = [[sx, sy]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cy < 0 || cx >= image.width || cy >= image.height) continue;
+    const pos = cy * image.width + cx;
+    if (seen[pos]) continue;
+    seen[pos] = 1;
+    const p = pos * 4;
+    const d = Math.abs(pixels.data[p] - target[0]) + Math.abs(pixels.data[p + 1] - target[1]) + Math.abs(pixels.data[p + 2] - target[2]);
+    if (d > tolerance * 3) continue;
+    out.data[p] = 45; out.data[p + 1] = 143; out.data[p + 2] = 125; out.data[p + 3] = 148;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+  }
+  maskCtx.putImageData(out, 0, 0);
+}
+
+async function requestReferenceSamMask(point) {
+  referenceEditor.samPoints.push({ x: point.x, y: point.y, label: referenceEditor.tool === 'sam-subtract' ? 'subtract' : 'add' });
+  const canvas = document.getElementById('referenceMaskCanvas');
+  const payload = {
+    points: referenceEditor.samPoints,
+    width: canvas.width,
+    height: canvas.height,
+  };
+  const result = referenceEditor.mode === 'guide'
+    ? await postJson('/api/guide-frame-mask-sam', {
+        ...payload,
+        chunk_index: referenceEditor.chunkIndex,
+        guide_index: referenceEditor.guideIndex,
+        fallback_path: referenceEditor.guideSourcePath,
+      })
+    : await postJson('/api/reference-mask-sam', {
+        ...payload,
+        manifest: referenceEditor.manifest,
+        index: referenceEditor.index,
+      });
+  if (!result.ok) return alert(result.error || 'Smart mask failed');
+  const img = new Image();
+  img.onload = () => {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 0.58;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.globalAlpha = 1;
+  };
+  img.src = result.mask;
+  document.getElementById('referenceEditStatus').textContent = `Smart select: ${result.provider || 'local region'}`;
+}
+
+function referenceMaskHasPixels() {
+  const canvas = document.getElementById('referenceMaskCanvas');
+  const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > 0) return true;
+  }
+  return false;
+}
+
+function referenceMaskDataUrl() {
+  if (!referenceMaskHasPixels()) return '';
+  const src = document.getElementById('referenceMaskCanvas');
+  const out = document.createElement('canvas');
+  out.width = src.width;
+  out.height = src.height;
+  const srcData = src.getContext('2d').getImageData(0, 0, src.width, src.height);
+  const outCtx = out.getContext('2d');
+  const data = outCtx.createImageData(out.width, out.height);
+  for (let i = 0; i < srcData.data.length; i += 4) {
+    const value = srcData.data[i + 3] > 0 ? 255 : 0;
+    data.data[i] = value;
+    data.data[i + 1] = value;
+    data.data[i + 2] = value;
+    data.data[i + 3] = 255;
+  }
+  outCtx.putImageData(data, 0, 0);
+  return out.toDataURL('image/png');
+}
+
+async function submitReferenceEditPreview() {
+  const status = document.getElementById('referenceEditStatus');
+  status.textContent = 'Starting Qwen edit preview...';
+  stopReferencePreviewPolling();
+  const mask = referenceMaskDataUrl();
+  const payload = {
+    instruction: document.getElementById('referenceEditInstruction')?.value || '',
+    sampled_color: referenceEditor.sampledColor,
+    mask,
+  };
+  const result = referenceEditor.mode === 'guide'
+    ? await postJson('/api/guide-frame-edit-preview', {
+        ...payload,
+        chunk_index: referenceEditor.chunkIndex,
+        guide_index: referenceEditor.guideIndex,
+      })
+    : await postJson('/api/reference-edit-preview', {
+        ...payload,
+        manifest: referenceEditor.manifest,
+        index: referenceEditor.index,
+      });
+  if (!result.ok) {
+    status.textContent = result.error || result.message || 'Could not start reference edit';
+    return;
+  }
+  referenceEditor.preview = result.preview || '';
+  status.textContent = result.message || 'Reference edit started.';
+  if (referenceEditor.preview) {
+    startReferencePreviewPolling(referenceEditor.preview);
+  }
+  setTimeout(() => refresh(true), 1000);
+}
+
+function startReferencePreviewPolling(path) {
+  const preview = document.getElementById('referenceEditPreview');
+  const status = document.getElementById('referenceEditStatus');
+  if (preview) preview.innerHTML = '<p class="shot-empty">Qwen preview is rendering...</p>';
+  if (status) status.textContent = 'Qwen preview is rendering...';
+  referenceEditor.previewPollStartedAt = Date.now();
+  pollReferencePreview(path);
+}
+
+async function pollReferencePreview(path) {
+  stopReferencePreviewPolling();
+  if (!path || path !== referenceEditor.preview) return;
+  const status = document.getElementById('referenceEditStatus');
+  const preview = document.getElementById('referenceEditPreview');
+  let result = null;
+  try {
+    result = await api('/api/media-status?path=' + encodeURIComponent(path));
+  } catch {
+    result = { ok: false };
+  }
+  if (path !== referenceEditor.preview) return;
+  if (result && result.ok && result.exists) {
+    if (preview) preview.innerHTML = `<img src="${media(path)}&t=${Date.now()}" alt="">`;
+    if (status) status.textContent = 'Qwen preview ready.';
+    refresh(true);
+    return;
+  }
+  const elapsed = Date.now() - referenceEditor.previewPollStartedAt;
+  if (result && result.ok && !result.running && elapsed > 5000) {
+    if (preview) preview.innerHTML = '<p class="shot-empty">Qwen finished, but ARP could not find the preview image. Check the run log for details.</p>';
+    if (status) status.textContent = 'Preview image was not found after Qwen finished.';
+    refresh(true);
+    return;
+  }
+  if (elapsed > 20 * 60 * 1000) {
+    if (preview) preview.innerHTML = '<p class="shot-empty">Still waiting for the preview image. Check ComfyUI and the run log.</p>';
+    if (status) status.textContent = 'Still waiting for Qwen preview.';
+    return;
+  }
+  if (status) status.textContent = result && result.running ? `Qwen preview is rendering: ${result.running_stage || 'running'}...` : 'Waiting for Qwen preview image...';
+  referenceEditor.previewPollTimer = setTimeout(() => pollReferencePreview(path), 1500);
+}
+
+async function acceptReferenceEditPreview() {
+  if (!referenceEditor.preview) return alert('Generate a preview first.');
+  const result = referenceEditor.mode === 'guide'
+    ? await postJson('/api/guide-frame-edit-accept', {
+        chunk_index: referenceEditor.chunkIndex,
+        guide_index: referenceEditor.guideIndex,
+        preview: referenceEditor.preview,
+      })
+    : await postJson('/api/reference-edit-accept', {
+        manifest: referenceEditor.manifest,
+        index: referenceEditor.index,
+        preview: referenceEditor.preview,
+      });
+  if (!result.ok) return alert(result.error || 'Could not accept edit');
+  state = result.state || await api(stateUrl());
+  closeReferenceEditor();
+  draw(false);
+  lastRenderSignature = renderSignature();
+}
+
+async function revertReferenceEdit() {
+  const result = referenceEditor.mode === 'guide'
+    ? await postJson('/api/guide-frame-edit-revert', {
+        chunk_index: referenceEditor.chunkIndex,
+        guide_index: referenceEditor.guideIndex,
+      })
+    : await postJson('/api/reference-edit-revert', {
+        manifest: referenceEditor.manifest,
+        index: referenceEditor.index,
+      });
+  if (!result.ok) return alert(result.error || 'Could not revert edit');
+  state = result.state || await api(stateUrl());
+  closeReferenceEditor();
+  draw(false);
+  lastRenderSignature = renderSignature();
+}
+
 function outpaintChunkCustomSeconds(index) {
   const checkbox = document.getElementById(`chunkCustom_${index}`);
   const slider = document.getElementById(`chunkFrames_${index}`);
@@ -124,6 +640,7 @@ function releaseChunkMedia(index) {
 
 async function regenerateOutpaintChunk(index) {
   releaseChunkMedia(index);
+  await saveStage('outpaint');
 
   const result = await postJson('/api/outpaint-chunk-regenerate', outpaintChunkForm(index));
   if (!result.ok) return alert(result.error || result.message || 'Could not regenerate chunk');

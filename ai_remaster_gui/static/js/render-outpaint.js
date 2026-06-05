@@ -60,11 +60,8 @@ function outpaintChunkSummary(row) {
       <label><input id="chunkCustom_${idx}" type="checkbox" ${custom ? 'checked' : ''} onchange="toggleChunkLength(${idx})"> Custom length</label>
       <label>Length: <span id="chunkFramesLabel_${idx}">${chunkLengthLabel(frameCount, fps)}</span></label>
       <input id="chunkFrames_${idx}" data-fps="${fps}" data-default-frames="${defaultFrames}" type="range" min="1" max="${maxFrames}" step="1" value="${frameCount}" ${custom ? '' : 'disabled'} oninput="updateChunkLengthLabel(${idx})">
-      <div class="shot-tools">
-        <button type="button" onclick="nudgeChunkLength(${idx},-1)" ${custom ? '' : 'disabled'}>-1 frame</button>
-        <input id="chunkFramesInput_${idx}" class="frame-input" type="number" min="1" max="${maxFrames}" step="1" value="${frameCount}" ${custom ? '' : 'disabled'} onchange="setChunkLengthFrames(${idx},this.value)">
-        <button type="button" onclick="nudgeChunkLength(${idx},1)" ${custom ? '' : 'disabled'}>+1 frame</button>
-      </div>
+      <input id="chunkFramesInput_${idx}" class="frame-input compact" type="number" min="1" max="${maxFrames}" step="1" value="${frameCount}" ${custom ? '' : 'disabled'} onchange="setChunkLengthFrames(${idx},this.value)">
+      ${chunkOffsetControls(row)}
       <label>Seed</label>
       <input id="chunkSeed_${idx}" type="number" value="${esc(row.seed || '42')}">
       <div class="shot-tools">
@@ -132,7 +129,7 @@ function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
     : (g.source_preview ? media(g.source_preview) : '');
   const thumbTitle = hasImage ? 'Current guide image' : 'Source frame at this position';
   const thumbHtml = thumbSrc
-    ? `<img id="gfThumb_${chunkIdx}_${guideIdx}" src="${esc(thumbSrc)}" alt="" onclick="openImageModal(this.src,${jsArg(thumbTitle)})">`
+    ? `<img id="gfThumb_${chunkIdx}_${guideIdx}" src="${esc(thumbSrc)}" alt="" title="${esc(thumbTitle)}" onclick="openGuideEditor(${chunkIdx},${guideIdx})">`
     : `<img id="gfThumb_${chunkIdx}_${guideIdx}" class="pending-thumb" alt="" title="Source preview not ready">`;
 
   return `
@@ -209,6 +206,7 @@ async function fetchGuideFramePreview(chunkIdx, guideIdx, fi) {
   if (result && result.preview) {
     img.classList.remove('pending-thumb');
     img.src = media(result.preview) + '&t=' + Date.now();
+    img.onclick = () => openGuideEditor(chunkIdx, guideIdx, result.preview);
     if (cap) cap.textContent = 'Source preview';
   }
 }
@@ -227,7 +225,58 @@ function nudgeGuideFrame(chunkIdx, guideIdx, delta) {
 }
 
 function updateOutpaintGuidePreviews() {
-  // Guide list re-renders via draw() on state change — nothing incremental needed.
+  if (active !== 'outpaint') return;
+  const rows = (state.outpaint_chunks && state.outpaint_chunks.rows) || [];
+  for (const row of rows) {
+    for (const guide of (row.guides || [])) {
+      updateGuideFrameCard(row.index, guide);
+    }
+  }
+  hydratePendingGuidePreviews();
+}
+
+function updateGuideFrameCard(chunkIdx, guide) {
+  const guideIdx = Number(guide.guide_index);
+  if (!Number.isFinite(guideIdx)) return;
+  const img = document.getElementById(`gfThumb_${chunkIdx}_${guideIdx}`);
+  if (!img) return;
+  const card = img.closest('.guide-frame-card');
+  const figure = img.closest('.still-figure');
+  const caption = document.getElementById(`gfThumbCaption_${chunkIdx}_${guideIdx}`);
+  const hasImage = !!guide.image_exists && !!guide.image;
+
+  if (hasImage) {
+    const src = media(guide.image) + (guide.image_mtime ? '&t=' + guide.image_mtime : '');
+    if (img.getAttribute('src') !== src) img.src = src;
+    img.classList.remove('pending-thumb');
+    img.dataset.guideLoaded = 'true';
+    delete img.dataset.guideLoading;
+    img.title = 'Current guide image';
+    img.onclick = () => openGuideEditor(chunkIdx, guideIdx);
+    if (figure) {
+      figure.classList.add('has-anchor');
+      if (!figure.querySelector('.anchor-badge')) {
+        figure.insertAdjacentHTML('beforeend', '<span class="anchor-badge">Guide</span>');
+      }
+    }
+    if (caption) caption.textContent = 'Guide image set';
+    if (card) {
+      card.querySelectorAll('button').forEach(button => {
+        if ((button.getAttribute('onclick') || '').startsWith('clearGuideFrameImage')) {
+          button.disabled = false;
+        }
+      });
+    }
+    return;
+  }
+
+  if (guide.source_preview && img.classList.contains('pending-thumb')) {
+    const src = media(guide.source_preview);
+    if (img.getAttribute('src') !== src) img.src = src;
+    img.classList.remove('pending-thumb');
+    img.onclick = () => openGuideEditor(chunkIdx, guideIdx, guide.source_preview);
+    if (caption) caption.textContent = 'Source preview';
+  }
 }
 
 function updateOutpaintRawPreviews() {
@@ -269,16 +318,44 @@ function updateOutpaintRuntimeControls() {
 
 function outpaintChunkPrompt(row) {
   const idx = row.index;
+  const positive = exactOutpaintPrompt(row.prompt_suffix || '', false, row.effective_prompt || '');
+  const negative = exactOutpaintPrompt(row.negative_suffix || '', true, row.effective_negative_prompt || '');
 
   return `
     <div>
       <label>Prompt suffix</label>
-      <textarea id="chunkPrompt_${idx}" placeholder="Optional direction for this chunk">${esc(row.prompt_suffix || '')}</textarea>
+      <textarea id="chunkPrompt_${idx}" placeholder="Optional direction for this chunk" oninput="updateExactOutpaintPrompt(${idx})">${esc(row.prompt_suffix || '')}</textarea>
       <label>Negative suffix</label>
-      <textarea id="chunkNegative_${idx}" placeholder="Optional things to avoid in this chunk">${esc(row.negative_suffix || '')}</textarea>
+      <textarea id="chunkNegative_${idx}" placeholder="Optional things to avoid in this chunk" oninput="updateExactOutpaintPrompt(${idx})">${esc(row.negative_suffix || '')}</textarea>
+      <div class="exact-prompt-panel" data-exact-prompt-chunk="${idx}">
+        <label>Positive sent to Comfy</label>
+        <textarea id="chunkExactPrompt_${idx}" readonly>${esc(positive)}</textarea>
+        <label>Negative sent to Comfy</label>
+        <textarea id="chunkExactNegative_${idx}" readonly>${esc(negative)}</textarea>
+      </div>
       <p class="shot-time">Use these to nudge LTX away from odd extra objects, warped geometry, hands, or missing details.</p>
     </div>
   `;
+}
+
+function exactOutpaintPrompt(suffix, negative = false, fallback = '') {
+  const s = settings('outpaint');
+  const base = (negative ? (s.negative_prompt || '') : (s.prompt || 'outpaint')).trim();
+  const extra = (suffix || '').trim();
+  if (!base && !extra) return fallback || '';
+  if (!base) return extra;
+  if (!extra) return base;
+  const separator = /[.!?:]$/.test(base) ? ' ' : '. ';
+  return `${base}${separator}${extra}`;
+}
+
+function updateExactOutpaintPrompt(index) {
+  const promptEl = document.getElementById(`chunkPrompt_${index}`);
+  const negativeEl = document.getElementById(`chunkNegative_${index}`);
+  const exactEl = document.getElementById(`chunkExactPrompt_${index}`);
+  const exactNegativeEl = document.getElementById(`chunkExactNegative_${index}`);
+  if (exactEl) exactEl.value = exactOutpaintPrompt(promptEl ? promptEl.value : '', false);
+  if (exactNegativeEl) exactNegativeEl.value = exactOutpaintPrompt(negativeEl ? negativeEl.value : '', true);
 }
 
 function toggleChunkLength(index) {
@@ -339,6 +416,24 @@ function chunkStillStrip(row, prefix, canAnchor) {
         : pendingChunkStillFigure(row, prefix, label, position)
       ).join('')}
     </div>
+  `;
+}
+
+function chunkOffsetControls(row) {
+  const idx = row.index;
+  return `
+    <div class="chunk-offsets">
+      <label>Offset X</label>
+      ${chunkOffsetControl(idx, 'x', row.offset_x || '0')}
+      <label>Offset Y</label>
+      ${chunkOffsetControl(idx, 'y', row.offset_y || '0')}
+    </div>
+  `;
+}
+
+function chunkOffsetControl(idx, axis, value) {
+  return `
+    <input id="chunkOffset_${axis}_${idx}" class="pixel-input chunk-offset-input" type="number" step="1" value="${esc(value)}">
   `;
 }
 
