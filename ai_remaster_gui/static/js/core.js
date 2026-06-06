@@ -97,6 +97,8 @@ function renderSignature() {
     settings: state.settings,
     expected_outputs: state.expected_outputs,
     existing_outputs: state.existing_outputs,
+    upscale_preview: state.upscale_preview,
+    output_selection: state.output_selection,
     source_previews: state.source_previews,
     source_info: state.source_info,
     source_monochrome: state.source_monochrome,
@@ -185,6 +187,7 @@ function updateOverviewDynamicStatus() {
 
   const infoEl = document.getElementById('overviewSourceInfo');
   if (infoEl) infoEl.innerHTML = sourceInfoHtml(state.source_info || {});
+  updateOverviewSectionControlsFromState();
 
   const progressEl = document.getElementById('overviewPipelineProgress');
   if (progressEl) {
@@ -196,8 +199,38 @@ function updateOverviewDynamicStatus() {
   if (tableEl) tableEl.innerHTML = overviewProgressTable();
 }
 
+function updateOverviewSectionControlsFromState() {
+  const start = document.getElementById('sectionStart');
+  const end = document.getElementById('sectionEnd');
+  if (!start || !end) return;
+  if ([start, end].includes(document.activeElement)) return;
+
+  const global = (state.settings && state.settings.global) || {};
+  const duration = parseDuration((state.source_info && state.source_info.duration) || '0');
+  const startValue = Number(global.section_start || 0);
+  const endValue = Number(global.section_end || duration || 0);
+  const sliderMax = Math.max(duration, startValue, endValue, 1);
+  const fpsText = (state.source_info && (state.source_info.fps || state.source_info.frame_rate)) || '';
+  const fps = Math.max(1, Number(String(fpsText).split(' ')[0]) || 24);
+  const step = (1 / fps).toFixed(6);
+
+  start.max = String(sliderMax);
+  end.max = String(sliderMax);
+  start.step = step;
+  end.step = step;
+  start.dataset.fps = String(fps);
+  end.dataset.fps = String(fps);
+  start.value = String(Math.min(sliderMax, Math.max(0, startValue)));
+  end.value = String(Math.min(sliderMax, Math.max(0, endValue)));
+
+  const startLabel = document.getElementById('sectionStartLabel');
+  const endLabel = document.getElementById('sectionEndLabel');
+  if (startLabel) startLabel.textContent = formatSeconds(start.value);
+  if (endLabel) endLabel.textContent = endValue ? formatSeconds(end.value) : 'End';
+}
+
 function hasMediaOnPage() {
-  return ['outpaint', 'colour', 'recomp', 'output'].includes(active)
+  return ['outpaint', 'colour', 'recomp', 'upscale', 'output'].includes(active)
     ? document.querySelectorAll('video').length > 0
     : false;
 }
@@ -210,7 +243,7 @@ function shouldPreserveInteractiveDom(mediaActive) {
 
   // Normal polling must not recreate video elements while the user is inspecting
   // chunk, shot, or recomposition previews. A manual Refresh still redraws.
-  return ['outpaint', 'colour', 'recomp', 'output'].includes(active);
+  return ['outpaint', 'colour', 'recomp', 'upscale', 'output'].includes(active);
 }
 
 function outpaintVisualSignature() {

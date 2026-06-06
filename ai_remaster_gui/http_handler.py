@@ -184,6 +184,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok, message = APP.run_stage(str(data.get("stage", "")))
             self.send_json({"ok": ok, "message": message})
+        elif parsed.path == "/api/upscale-preview":
+            ok, message = APP.run_upscale_preview()
+            self.send_json({"ok": ok, "message": message})
         elif parsed.path == "/api/stop":
             APP.stop()
             self.send_json({"ok": True})

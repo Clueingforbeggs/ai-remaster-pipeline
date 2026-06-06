@@ -960,6 +960,7 @@ async function saveGlobalPipelineOptions() {
     values: {
       expand_outpaint: String(document.getElementById('globalExpandOutpaint').checked),
       colorize: String(document.getElementById('globalColorize').checked),
+      upscale: String(document.getElementById('globalUpscale').checked),
     },
   });
 
@@ -1130,6 +1131,7 @@ async function confirmOverwrite(key) {
 
 async function runStage(key) {
   if (key === 'recomp') releaseFinalOutputVideos();
+  if (key === 'upscale') releaseFinalOutputVideos();
   await saveStage(key);
   if (key === 'references' && (settings('references').method || 'qwen') === 'openai' && !((settings('references').openai_api_key || '').trim())) {
     alert('Add your OpenAI API key in Settings before running OpenAI Reference Generation.');
@@ -1143,6 +1145,23 @@ async function runStage(key) {
   const result = await postJson('/api/run', { stage: key });
   if (!result.ok) alert(result.message);
   setTimeout(() => refresh(true), 500);
+}
+
+async function generateUpscalePreview() {
+  await saveStage('upscale');
+  const result = await postJson('/api/upscale-preview', {});
+  if (!result.ok) alert(result.message);
+  setTimeout(() => pollUpscalePreview(), 500);
+}
+
+async function pollUpscalePreview() {
+  state = await api(stateUrl());
+  updateRunLogs();
+  if (state.running) {
+    setTimeout(() => pollUpscalePreview(), 1500);
+    return;
+  }
+  refresh(true);
 }
 
 function releaseFinalOutputVideos() {

@@ -3,6 +3,8 @@ function drawGlobal() {
   const source = global.source || '';
   const expandOutpaint = global.expand_outpaint !== 'false';
   const colorize = global.colorize !== 'false';
+  const upscale = global.upscale === 'true';
+  const noProcessing = !expandOutpaint && !colorize && !upscale;
   const analysis = state.source_analysis || {};
   const sourceTone = source && !analysis.ready
     ? (analysis.message || 'Analyzing source material')
@@ -27,11 +29,8 @@ function drawGlobal() {
       ${overviewSourcePicker(source)}
       ${sourceAnalysisHtml(analysis)}
       ${overviewSectionPicker(global, source)}
-      <div class="checks">
-        <label><input id="globalExpandOutpaint" type="checkbox" ${expandOutpaint ? 'checked' : ''}>Expand using Outpainting</label>
-        <label><input id="globalColorize" type="checkbox" ${colorize ? 'checked' : ''}>Colorize</label>
-        <span id="overviewSourceTone" class="shot-time">${esc(sourceTone)}</span>
-      </div>
+      ${workflowPickerHtml(expandOutpaint, colorize, upscale, sourceTone)}
+      ${noProcessing ? '<div class="inline-warning"><strong>No processing stages selected.</strong> Choose at least one workflow step, otherwise Run Whole Remaster has nothing to do.</div>' : ''}
       <div id="overviewFilmstrip">${overviewFilmstripInner()}</div>
       <div id="overviewSourceInfo">${sourceInfoHtml(state.source_info || {})}</div>
       <div id="overviewPipelineProgress">${progressHtml(progress.percent, progress.label)}</div>
@@ -44,7 +43,51 @@ function drawGlobal() {
   document.getElementById('globalSource').addEventListener('change', saveGlobal);
   document.getElementById('globalExpandOutpaint').addEventListener('change', saveGlobalPipelineOptions);
   document.getElementById('globalColorize').addEventListener('change', saveGlobalPipelineOptions);
+  document.getElementById('globalUpscale').addEventListener('change', saveGlobalPipelineOptions);
   bindOverviewSectionControls();
+}
+
+function workflowPickerHtml(expandOutpaint, colorize, upscale, sourceTone) {
+  return `
+    <div class="workflow-list">
+      ${workflowOptionHtml({
+        id: 'globalExpandOutpaint',
+        checked: expandOutpaint,
+        icon: 'wide',
+        title: 'Expand using Outpainting',
+        body: 'Extend the frame to the chosen aspect ratio before the rest of the pipeline runs. Skip this when the source is already framed the way you want.',
+      })}
+      ${workflowOptionHtml({
+        id: 'globalColorize',
+        checked: colorize,
+        icon: 'colour',
+        title: 'Colorize',
+        body: 'Detect shots, make reference frames, and colorize the video before recomposition.',
+        note: sourceTone,
+      })}
+      ${workflowOptionHtml({
+        id: 'globalUpscale',
+        checked: upscale,
+        icon: 'upscale',
+        title: 'Upscale',
+        body: 'Run FlashVSR after recomposition, or directly on the selected source section if no earlier processing is selected.',
+      })}
+    </div>
+  `;
+}
+
+function workflowOptionHtml(item) {
+  return `
+    <label class="workflow-option ${item.checked ? 'is-on' : ''}" for="${item.id}">
+      <input id="${item.id}" type="checkbox" ${item.checked ? 'checked' : ''}>
+      <span class="workflow-thumb workflow-${item.icon}" aria-hidden="true"></span>
+      <span class="workflow-copy">
+        <strong>${esc(item.title)}</strong>
+        <span>${esc(item.body)}</span>
+        ${item.note ? `<em>${esc(item.note)}</em>` : ''}
+      </span>
+    </label>
+  `;
 }
 
 function sourceAnalysisHtml(analysis) {
@@ -84,7 +127,8 @@ function overviewSectionPicker(global, source) {
   const start = Number(global.section_start || 0);
   const duration = parseDuration((state.source_info && state.source_info.duration) || '0');
   const end = Number(global.section_end || duration || 0);
-  const fps = Math.max(1, Number((state.source_info && state.source_info.fps) || 24));
+  const fpsText = (state.source_info && (state.source_info.fps || state.source_info.frame_rate)) || '';
+  const fps = Math.max(1, Number(String(fpsText).split(' ')[0]) || 24);
   const sliderMax = Math.max(duration, end, 1);
   const frameStep = (1 / fps).toFixed(6);
   return `

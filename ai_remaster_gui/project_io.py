@@ -83,6 +83,7 @@ def load_project_payload(data: dict) -> dict[str, dict[str, str]]:
             loaded[stage].update({str(key): str(value) for key, value in values.items()})
     if not loaded.get("global", {}).get("source"):
         loaded.setdefault("global", {})["expand_outpaint"] = "true"
+    loaded.setdefault("global", {}).setdefault("upscale", "false")
     return loaded
 
 def project_asset_paths(settings: dict[str, dict[str, str]]) -> list[Path]:

@@ -27,6 +27,7 @@ import openai_generate_reference  # noqa: E402
 import outpaint_video  # noqa: E402
 import prepare_outpaint_input  # noqa: E402
 import qwen_colorize_references  # noqa: E402
+import upscale_video  # noqa: E402
 
 from ai_remaster_gui import app
 from ai_remaster_gui import config
@@ -110,6 +111,7 @@ class GuiSmokeTests(unittest.TestCase):
             crop_bottom=270,
             black_lift=0.018,
             gamma=1.06,
+            outpaint_all_black_regions=False,
         )
         info = {"width": 1440, "height": 1080, "fps": 24.0}
 
@@ -119,6 +121,47 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertIn("crop=w=1440:h=540:x=0:y=270,scale=w=960:h=360:flags=lanczos,scale=w=960:h=352:flags=lanczos", filter_text)
         self.assertNotIn("force_original_aspect_ratio=decrease", filter_text)
+
+    def test_outpaint_all_black_regions_bypasses_source_lift(self) -> None:
+        args = argparse.Namespace(
+            delivery_width=1280,
+            delivery_height=720,
+            crop_left=0,
+            crop_right=0,
+            crop_top=0,
+            crop_bottom=0,
+            black_lift=0.018,
+            gamma=1.06,
+            outpaint_all_black_regions=True,
+        )
+        info = {"width": 960, "height": 720, "fps": 24.0}
+
+        filter_text = prepare_outpaint_input.build_filter(args, info, 1280, 704)
+
+        self.assertNotIn("lutrgb=", filter_text)
+        self.assertIn("color=c=black:s=1280x704", filter_text)
+
+    def test_outpaint_all_black_regions_changes_output_paths_and_command(self) -> None:
+        app.APP.settings.setdefault("outpaint", {}).update(
+            {
+                "target_aspect": "16:9",
+                "target_height": "720",
+                "crop_left": "0",
+                "crop_right": "0",
+                "crop_top": "0",
+                "crop_bottom": "0",
+                "outpaint_all_black_regions": "true",
+            }
+        )
+        app.APP.settings["global"].update({"source": "input/My Source.mp4", "section_start": "0", "section_end": ""})
+
+        output = app.outpaint_output_for("input/My Source.mp4", "16:9", "720")
+        prepared = app.outpaint_prepared_for("input/My Source.mp4", app.APP.settings["outpaint"])
+        command = app.APP.command_for("outpaint")
+
+        self.assertIn("_allblack_outpainted.mp4", output)
+        self.assertTrue(prepared.name.endswith("_allblack.mp4"))
+        self.assertIn("--outpaint-all-black-regions", command)
 
     def test_portable_comfy_parent_resolves_to_inner_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -158,6 +201,7 @@ class GuiSmokeTests(unittest.TestCase):
             "ComfyUI-LTXVideo": ("LTXVImgToVideoConditionOnly", "LTXAddVideoICLoRAGuide", "LTXVPreprocess"),
             "ComfyUI-GGUF": ("UnetLoaderGGUF",),
             "ComfyUI-VideoHelperSuite": ("VHS_LoadVideo", "VHS_VideoCombine"),
+            "ComfyUI-FlashVSR_Ultra_Fast": ("FlashVSRNode",),
             "reference-video-colorization": ("DeepExColorVideoNode", "ColorMNetVideo"),
         }
         vendor_root = app.ROOT / "vendor" / "comfyui_custom_nodes"
@@ -778,6 +822,18 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertIn("source_sections", app.pipeline_source_text(app.APP.settings))
 
+    def test_opening_source_resets_trim_to_source_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            source = Path(tmp_text) / "new-source.mp4"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update({"source": "input/old.mp4", "section_start": "10", "section_end": "20"})
+
+            with mock.patch.object(server, "video_metrics", return_value={"duration": 123.456}):
+                app.APP.update_settings("global", {"source": str(source)})
+
+        self.assertEqual(app.APP.settings["global"]["section_start"], "0")
+        self.assertEqual(app.APP.settings["global"]["section_end"], "123.456")
+
     def test_project_payload_round_trips_settings_with_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             path = Path(tmp_text) / "demo.arpp"
@@ -1174,6 +1230,308 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(app.APP.settings["shots"]["outpainted_video"], "input/example.mp4")
         self.assertIn("input/example.mp4", command)
 
+    def test_no_overview_steps_selected_leaves_only_output_tab(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "false", "section_start": "0", "section_end": ""})
+
+        self.assertEqual(app.APP.active_stages(), ())
+        self.assertEqual(app.APP.phase_progress()["stages"], [])
+
+    def test_optional_phase_combinations_have_expected_stage_order(self) -> None:
+        cases = [
+            (False, False, False, []),
+            (True, False, False, ["outpaint", "recomp"]),
+            (False, True, False, ["shots", "references", "colour", "recomp"]),
+            (False, False, True, ["upscale"]),
+            (True, True, False, ["outpaint", "shots", "references", "colour", "recomp"]),
+            (True, False, True, ["outpaint", "recomp", "upscale"]),
+            (False, True, True, ["shots", "references", "colour", "recomp", "upscale"]),
+            (True, True, True, ["outpaint", "shots", "references", "colour", "recomp", "upscale"]),
+        ]
+        for outpaint, colorize, upscale, expected in cases:
+            with self.subTest(outpaint=outpaint, colorize=colorize, upscale=upscale):
+                app.APP.settings["global"].update(
+                    {
+                        "source": "input/example.mp4",
+                        "expand_outpaint": "true" if outpaint else "false",
+                        "colorize": "true" if colorize else "false",
+                        "upscale": "true" if upscale else "false",
+                        "section_start": "0",
+                        "section_end": "",
+                    }
+                )
+
+                self.assertEqual([stage.key for stage in app.APP.active_stages()], expected)
+
+    def test_outpaint_without_colour_can_feed_upscale_after_recomposition(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "true", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["outpaint"].update({"target_aspect": "16:9", "target_height": "720", "crop_left": "0", "crop_right": "0", "crop_top": "0", "crop_bottom": "0"})
+
+        outpainted = app.outpaint_output_for("input/example.mp4", "16:9", "720")
+        outpainted_path = app.resolve(outpainted)
+        outpainted_path.parent.mkdir(parents=True, exist_ok=True)
+        outpainted_path.write_bytes(b"placeholder")
+        try:
+            app.APP.hydrate_stage_inputs("outpaint")
+            recomp_output = app.recomposition_output_for(outpainted)
+            command = app.APP.command_for("upscale")
+        finally:
+            outpainted_path.unlink(missing_ok=True)
+
+        self.assertEqual([stage.key for stage in app.APP.active_stages()], ["outpaint", "recomp", "upscale"])
+        self.assertEqual(app.APP.settings["upscale"]["input_video"], recomp_output)
+        self.assertEqual(command[command.index("--input") + 1], recomp_output)
+
+    def test_upscale_after_earlier_phase_waits_for_recomposition_output(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "true", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["recomp"]["output"] = "output/reassembled/missing_recomposition.mp4"
+
+        ok, message = app.APP.run_stage("upscale")
+
+        self.assertFalse(ok)
+        self.assertIn("Run Recomposition first", message)
+
+    def test_outpaint_hydration_does_not_pick_stale_newest_output_for_new_source(self) -> None:
+        app.APP.settings["global"].update({"source": "input/new-source.mp4", "expand_outpaint": "true", "colorize": "false", "upscale": "false", "section_start": "0", "section_end": ""})
+        stale = app.ROOT / "intermediate" / "outpainted" / "old-source_16x9_1280x704_outpainted.mp4"
+
+        with mock.patch.object(server, "newest", return_value=stale):
+            app.APP.hydrate_stage_inputs("upscale")
+
+        self.assertEqual(app.APP.settings["recomp"]["outpainted_video"], "")
+
+    def test_upscale_only_uses_pipeline_source(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["upscale"].update({"target_width": "1920", "target_height": "1080"})
+
+        app.APP.hydrate_stage_inputs("global")
+        stage_keys = [stage.key for stage in app.APP.active_stages()]
+        command = app.APP.command_for("upscale")
+
+        self.assertEqual(stage_keys, ["upscale"])
+        self.assertEqual(app.APP.settings["upscale"]["input_video"], "input/example.mp4")
+        self.assertNotIn("--method", command)
+        self.assertIn("--target-width", command)
+        self.assertIn("1920", command)
+        self.assertIn("--comfy-url", command)
+        self.assertEqual(command[command.index("--flashvsr-model") + 1], "FlashVSR-v1.1")
+        self.assertEqual(command[command.index("--flashvsr-mode") + 1], "tiny")
+        self.assertIn("--flashvsr-tiled-vae", command)
+        self.assertIn("--flashvsr-tiled-dit", command)
+        self.assertNotIn("--flashvsr-unload-dit", command)
+        self.assertIn("scripts\\upscale_video.py", " ".join(command))
+
+    def test_upscale_can_request_flashvsr_unload_dit(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["upscale"].update({"target_width": "1920", "target_height": "1080", "flashvsr_unload_dit": "true"})
+
+        command = app.APP.command_for("upscale")
+
+        self.assertIn("--flashvsr-unload-dit", command)
+
+    def test_upscale_preview_clips_directly_from_selected_source_section(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            source = Path(tmp_text) / "source.mp4"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update(
+                {
+                    "source": app.rel(source),
+                    "expand_outpaint": "false",
+                    "colorize": "false",
+                    "upscale": "true",
+                    "section_start": "1",
+                    "section_end": "2",
+                }
+            )
+            app.APP.settings["upscale"].update({"target_width": "1920", "target_height": "1080"})
+
+            with (
+                mock.patch.object(server, "ensure_source_section_clip") as ensure,
+                mock.patch.object(server, "media_clip_path", side_effect=RuntimeError("clip probe")) as clip,
+            ):
+                ok, message = app.APP.run_upscale_preview()
+
+        self.assertFalse(ok)
+        ensure.assert_not_called()
+        clip.assert_called_once()
+        self.assertEqual(clip.call_args.args[0], source)
+        self.assertAlmostEqual(clip.call_args.args[1], 1.0)
+        self.assertAlmostEqual(clip.call_args.args[2], 2.0)
+        self.assertIn("clip probe", message)
+        self.assertNotIn("input does not exist", message)
+
+    def test_upscale_preview_completion_does_not_hydrate_shot_detection(self) -> None:
+        class FakeProcess:
+            stdout = ["Wrote upscaled video: output/upscaled/previews/example.mp4\n"]
+
+            def wait(self) -> int:
+                return 0
+
+        original_process = app.APP.process
+        original_log = app.APP.log
+        app.APP.process = FakeProcess()
+        app.APP.log = []
+        app.APP.running_stage = "Upscale Preview"
+        app.APP.running_stage_key = "upscale"
+
+        try:
+            with mock.patch.object(app.APP, "hydrate_stage_inputs") as hydrate:
+                app.APP._collect_output("upscale_preview")
+        finally:
+            app.APP.process = original_process
+            log = app.APP.log
+            app.APP.log = original_log
+            app.APP.running_stage = ""
+            app.APP.running_stage_key = ""
+
+        hydrate.assert_not_called()
+        self.assertIn("Upscale preview ready.", log)
+        self.assertFalse(any("Updated Shot Detection input" in line for line in log))
+
+    def test_upscale_preview_state_uses_generated_clip_output_pair(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            clip = Path(tmp_text) / "preview-clip.mp4"
+            output = app.ROOT / "output" / "upscaled" / "previews" / "preview-clip_flashvsr_1920x1080_preview_6s.mp4"
+            clip.write_bytes(b"placeholder")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"placeholder")
+            app.APP.settings["upscale"].update({"preview_source": app.rel(clip), "preview_output": app.rel(output)})
+
+            try:
+                preview = app.APP.upscale_preview_state()
+            finally:
+                output.unlink(missing_ok=True)
+
+        self.assertEqual(preview["source"], app.rel(clip))
+        self.assertEqual(preview["output"], app.rel(output))
+        self.assertEqual(preview["exists"], "true")
+
+    def test_upscale_preview_start_records_actual_clip_and_output(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            source = Path(tmp_text) / "source.mp4"
+            clip = Path(tmp_text) / "clip.mp4"
+            source.write_bytes(b"placeholder")
+            clip.write_bytes(b"placeholder")
+            app.APP.settings["global"].update(
+                {
+                    "source": app.rel(source),
+                    "expand_outpaint": "false",
+                    "colorize": "false",
+                    "upscale": "true",
+                    "section_start": "0",
+                    "section_end": "",
+                }
+            )
+            app.APP.settings["upscale"].update({"target_width": "1920", "target_height": "1080", "preview_seconds": "6"})
+
+            class FakeProcess:
+                stdout = []
+
+                def poll(self):
+                    return None
+
+            with (
+                mock.patch.object(server, "media_clip_path", return_value=clip),
+                mock.patch.object(server.subprocess, "Popen", return_value=FakeProcess()),
+                mock.patch.object(server.threading.Thread, "start", lambda _self: None),
+            ):
+                ok, message = app.APP.run_upscale_preview()
+
+        self.assertTrue(ok, message)
+        self.assertEqual(app.APP.settings["upscale"]["preview_source"], app.rel(clip))
+        self.assertEqual(app.APP.settings["upscale"]["preview_output"], "output/upscaled/previews/clip_flashvsr_1920x1080_preview_6s.mp4")
+
+    def test_upscale_only_ignores_stale_recomposition_input(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["upscale"].update(
+            {
+                "method": "realbasicvsr",
+                "input_video": "output/reassembled/old_intermediate_final.mp4",
+                "output": "output/upscaled/old_intermediate_final_realbasicvsr_3840x2160.mp4",
+                "target_width": "1920",
+                "target_height": "1080",
+            }
+        )
+
+        command = app.APP.command_for("upscale")
+
+        self.assertIn("--input", command)
+        self.assertEqual(command[command.index("--input") + 1], "input/example.mp4")
+        self.assertEqual(command[command.index("--output") + 1], "output/upscaled/example_flashvsr_1920x1080.mp4")
+        self.assertNotIn("--method", command)
+
+    def test_upscale_ignores_stale_backend_method_setting(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["upscale"].update({"method": "realbasicvsr", "target_width": "1920", "target_height": "1080"})
+
+        command = app.APP.command_for("upscale")
+
+        self.assertNotIn("--method", command)
+        self.assertNotIn("--realbasicvsr-repo", command)
+        self.assertIn("--comfy-url", command)
+        self.assertEqual(command[command.index("--output") + 1], "output/upscaled/example_flashvsr_1920x1080.mp4")
+
+    def test_flashvsr_prompt_uses_video_helper_load_and_combine_nodes(self) -> None:
+        args = argparse.Namespace(
+            flashvsr_model="FlashVSR-v1.1",
+            flashvsr_mode="tiny",
+            flashvsr_scale=2,
+            flashvsr_tiled_vae=True,
+            flashvsr_tiled_dit=True,
+            flashvsr_unload_dit=True,
+            flashvsr_seed=123,
+        )
+        info = {
+            "FlashVSRNode": {
+                "input": {
+                    "required": {
+                        "frames": ("IMAGE",),
+                        "model": (["FlashVSR", "FlashVSR-v1.1"],),
+                        "mode": (["tiny", "tiny-long", "full"],),
+                        "scale": ("INT", {"default": 4}),
+                        "tiled_vae": ("BOOLEAN", {"default": True}),
+                        "tiled_dit": ("BOOLEAN", {"default": True}),
+                        "unload_dit": ("BOOLEAN", {"default": False}),
+                        "seed": ("INT", {"default": 0}),
+                    }
+                }
+            }
+        }
+
+        prompt = upscale_video.flashvsr_prompt("example.mp4", 24.0, args, "arp_upscale/example", info)
+
+        self.assertEqual(prompt["1"]["class_type"], "VHS_LoadVideo")
+        self.assertEqual(prompt["2"]["class_type"], "FlashVSRNode")
+        self.assertEqual(prompt["2"]["inputs"]["frames"], ["1", 0])
+        self.assertEqual(prompt["2"]["inputs"]["model"], "FlashVSR-v1.1")
+        self.assertEqual(prompt["2"]["inputs"]["mode"], "tiny")
+        self.assertEqual(prompt["2"]["inputs"]["scale"], 2)
+        self.assertEqual(prompt["2"]["inputs"]["tiled_vae"], True)
+        self.assertEqual(prompt["2"]["inputs"]["tiled_dit"], True)
+        self.assertEqual(prompt["2"]["inputs"]["unload_dit"], True)
+        self.assertEqual(prompt["2"]["inputs"]["seed"], 123)
+        self.assertEqual(prompt["3"]["class_type"], "VHS_VideoCombine")
+        self.assertEqual(prompt["3"]["inputs"]["images"], ["2", 0])
+        self.assertEqual(prompt["3"]["inputs"]["audio"], ["1", 2])
+
+    def test_upscale_runs_after_recomposition_when_processing_is_enabled(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "true", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+        app.APP.settings["outpaint"].update({"target_aspect": "16:9", "target_height": "720", "crop_left": "0", "crop_right": "0", "crop_top": "0", "crop_bottom": "0"})
+
+        with mock.patch.object(server, "newest", return_value=None):
+            app.APP.hydrate_stage_inputs("global")
+        stage_keys = [stage.key for stage in app.APP.active_stages()]
+        outpainted = app.outpaint_output_for("input/example.mp4", "16:9", "720")
+        outpainted_path = app.resolve(outpainted)
+        outpainted_path.parent.mkdir(parents=True, exist_ok=True)
+        outpainted_path.write_bytes(b"placeholder")
+        try:
+            app.APP.hydrate_stage_inputs("outpaint")
+        finally:
+            outpainted_path.unlink(missing_ok=True)
+
+        self.assertEqual(stage_keys, ["outpaint", "recomp", "upscale"])
+        self.assertTrue(app.APP.settings["upscale"]["input_video"].startswith("output/reassembled/"))
+
     def test_new_outpaint_source_does_not_hydrate_empty_manifest_as_repo_root(self) -> None:
         app.APP.settings["global"].update({"source": "input/new-source.mp4", "expand_outpaint": "true", "colorize": "true", "section_start": "0", "section_end": ""})
         app.APP.settings.setdefault("outpaint", {}).update({"target_aspect": "16:9", "target_height": "480"})
@@ -1189,6 +1547,7 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_outpaint_progress_surfaces_active_comfy_chunk_globally(self) -> None:
         original_log = app.APP.log
+        app.APP.settings["global"].update({"expand_outpaint": "true", "colorize": "false", "upscale": "false"})
         app.APP.running_stage_key = "outpaint"
         app.APP.running_stage = "Outpainting"
         app.APP.run_started_at = time.time() - 120

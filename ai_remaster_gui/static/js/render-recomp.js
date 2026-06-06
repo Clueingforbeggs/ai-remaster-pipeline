@@ -103,21 +103,137 @@ function recompTimelineHtml() {
 function drawOutput() {
   const expected = (state.expected_outputs && state.expected_outputs.output) || [];
   const path = expected[0] || settings('recomp').output || '';
+  const selected = state.output_selection || {};
 
   document.getElementById('app').innerHTML = `
     <section class="card editor-viewer">
       <h2>Output</h2>
-      ${path ? outputVideoHtml(path) : '<p class="shot-empty">Run Recomposition to create the final movie.</p>'}
+      ${path ? outputVideoHtml(path, selected) : '<p class="shot-empty">Run a selected workflow step to create an output movie.</p>'}
     </section>
   `;
 }
 
-function outputVideoHtml(path) {
+function outputVideoHtml(path, selected = {}) {
+  const label = selected.label || 'Selected output';
   return `
     <video src="${media(path)}" controls preload="metadata"></video>
-    <h3>Final output</h3>
+    <h3>${esc(label)}</h3>
     <ul class="output-list"><li>${esc(path)}</li></ul>
   `;
+}
+
+function drawUpscale() {
+  const st = stage('upscale');
+  const s = settings('upscale');
+  const expected = (state.expected_outputs && state.expected_outputs.upscale) || [];
+  const preview = state.upscale_preview || {};
+  const sp = stageProgress('upscale');
+
+  document.getElementById('app').innerHTML = `
+    <div class="editor-page">
+      <section class="card">
+        <h2>${st.title}</h2>
+        <p>${st.description}</p>
+        ${progressHtml(sp.percent, sp.label)}
+        ${upscaleInputSummary(s)}
+        ${upscaleMainFields(st)}
+        ${shotOutputList(expected, null)}
+        ${stageCheckboxes(s)}
+        <div class="actions">
+          <button type="button" onclick="generateUpscalePreview()" ${state.running ? 'disabled' : ''}>Generate Preview</button>
+          <button class="primary" onclick="runStage('upscale')" ${state.running ? 'disabled' : ''}>Run Upscaling</button>
+          <button class="warn" onclick="stopRun()" ${state.running ? '' : 'disabled'}>Stop</button>
+        </div>
+        <div class="command" id="cmd"></div>
+      </section>
+      <section class="card editor-viewer">
+        <h2>Upscale Preview</h2>
+        ${upscaleComparisonHtml(s, preview)}
+      </section>
+    </div>
+    <section class="card" style="margin-top:16px">${runLogHtml()}</section>
+  `;
+
+  bindStageFields('upscale');
+  bindUpscaleComparison();
+  showCommand('upscale');
+}
+
+function upscaleMainFields(st) {
+  const fieldKeys = ['flashvsr_model', 'flashvsr_mode', 'flashvsr_scale', 'flashvsr_tiled_vae', 'flashvsr_tiled_dit', 'flashvsr_unload_dit', 'flashvsr_seed'];
+  fieldKeys.push('target_width', 'target_height', 'preview_seconds');
+  return fieldKeys
+    .map(key => fieldHtml(st, st.fields.find(f => f[0] === key)))
+    .join('');
+}
+
+function upscaleInputSummary(s) {
+  const source = (state.upscale_preview && state.upscale_preview.source) || s.input_video || '';
+  const label = (state.output_selection && state.output_selection.kind || '').startsWith('recomposed')
+    ? 'Recomposition output'
+    : 'Selected source or source section';
+  return `
+    <div class="layer-item">
+      <span>Input source</span>
+      <strong>${esc(source || 'Choose source material on the Overview page')}</strong>
+      <p class="shot-empty">${esc(label)} is selected automatically from the active workflow.</p>
+    </div>
+  `;
+}
+
+function upscaleComparisonHtml(s, preview) {
+  const before = preview.source || s.input_video || '';
+  const after = preview.exists === 'true' ? preview.output : '';
+  if (!before) return '<p class="shot-empty">Choose a source on the Overview page, then enable Upscale.</p>';
+  if (!after) {
+    return `
+      <video src="${media(before)}" controls preload="metadata"></video>
+      <p class="shot-empty">Generate a preview to compare FlashVSR output against the input.</p>
+    `;
+  }
+  return `
+    <div class="comparison-player">
+      <video class="compare-before" src="${media(before)}" controls preload="metadata"></video>
+      <video class="compare-after" src="${media(after)}" muted preload="metadata"></video>
+      <div class="compare-after-mask" style="width:50%"></div>
+      <div class="compare-handle" style="left:50%"></div>
+    </div>
+    <input id="upscaleCompareSlider" class="compare-slider" type="range" min="0" max="100" value="50" aria-label="Before after split">
+    <div class="source-info">
+      <div><span>Before</span><strong>${esc(before)}</strong></div>
+      <div><span>After</span><strong>${esc(after)}</strong></div>
+    </div>
+  `;
+}
+
+function bindUpscaleComparison() {
+  const before = document.querySelector('.compare-before');
+  const after = document.querySelector('.compare-after');
+  const slider = document.getElementById('upscaleCompareSlider');
+  const mask = document.querySelector('.compare-after-mask');
+  const handle = document.querySelector('.compare-handle');
+  if (!before || !after || !slider || !mask || !handle) return;
+
+  const setSplit = () => {
+    after.style.clipPath = `inset(0 ${100 - Number(slider.value)}% 0 0)`;
+    mask.style.width = slider.value + '%';
+    handle.style.left = slider.value + '%';
+  };
+  const sync = force => {
+    if (!after.readyState) return;
+    const tolerance = force ? 0.02 : 0.18;
+    if (Math.abs((after.currentTime || 0) - (before.currentTime || 0)) > tolerance) {
+      try { after.currentTime = before.currentTime || 0; } catch {}
+    }
+  };
+
+  slider.addEventListener('input', setSplit);
+  before.addEventListener('play', () => { sync(true); after.play().catch(() => {}); });
+  before.addEventListener('pause', () => after.pause());
+  before.addEventListener('seeking', () => sync(true));
+  before.addEventListener('timeupdate', () => sync(false));
+  before.addEventListener('ratechange', () => { after.playbackRate = before.playbackRate; });
+  setSplit();
 }
 
 function liveCompositeHtml(s) {

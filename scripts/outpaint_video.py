@@ -69,7 +69,9 @@ def model_safe_size(source: Path, aspect: str, target_height: int | None) -> tup
 
 def crop_slug(args: Any) -> str:
     values = [int(getattr(args, key, 0)) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
-    return "" if not any(values) else f"_crop{values[0]}-{values[1]}-{values[2]}-{values[3]}"
+    crop = "" if not any(values) else f"_crop{values[0]}-{values[1]}-{values[2]}-{values[3]}"
+    mode = "_allblack" if getattr(args, "outpaint_all_black_regions", False) else ""
+    return crop + mode
 
 
 def default_output(source: Path, aspect: str, target_height: int | None, args: Any | None = None) -> Path:
@@ -606,7 +608,7 @@ def raw_signature(args, workflow_path: Path, prepared: Path, seed: int | None = 
     prompt_text = combine_prompt(args.prompt, prompt_suffix)
     negative_text = combine_prompt(args.negative_prompt, negative_suffix)
     return {
-        "version": 23,
+        "version": 24,
         "tool": "outpaint_video.py/raw_comfy",
         "prepared": root_relative(prepared),
         "prepared_fingerprint": file_fingerprint(prepared),
@@ -615,6 +617,7 @@ def raw_signature(args, workflow_path: Path, prepared: Path, seed: int | None = 
         "target_aspect": args.target_aspect,
         "delivery_target_height": args.target_height,
         "model_size_multiple": MODEL_SIZE_MULTIPLE,
+        "outpaint_all_black_regions": bool(getattr(args, "outpaint_all_black_regions", False)),
         "prompt": prompt_text,
         "prompt_suffix": prompt_suffix,
         "negative_suffix": negative_suffix,
@@ -1032,6 +1035,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--guide-end-strength", type=float, default=1.0, help="Conditioning strength for the end-frame guide (IC-LoRA, 0–1). Default: 1.0.")
     parser.add_argument("--black-lift", type=float, default=0.018)
     parser.add_argument("--gamma", type=float, default=1.06)
+    parser.add_argument("--outpaint-all-black-regions", action="store_true", help="Leave source blacks untouched so black regions inside the source can be outpainted.")
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -1091,6 +1095,8 @@ def main() -> int:
         "--crop-bottom",
         str(args.crop_bottom),
     ]
+    if args.outpaint_all_black_regions:
+        prepare_command.append("--outpaint-all-black-regions")
     prepare_command += ["--target-height", str(work_height)]
     prepare_command += ["--target-width", str(work_width)]
     prepare_command += ["--delivery-width", str(delivery_width)]
@@ -1105,7 +1111,8 @@ def main() -> int:
             f"from delivery {delivery_width}x{delivery_height}). Recomposition will upscale back to delivery.",
             flush=True,
         )
-    print(f"Preparing expanded outpaint canvas: {work_width}x{work_height}, aspect {args.target_aspect}, black_lift={args.black_lift}, gamma={args.gamma}", flush=True)
+    mode = "all black regions" if args.outpaint_all_black_regions else "protected source blacks"
+    print(f"Preparing expanded outpaint canvas: {work_width}x{work_height}, aspect {args.target_aspect}, black_lift={args.black_lift}, gamma={args.gamma}, mode={mode}", flush=True)
     run_command(prepare_command, False)
 
     output_prefix = f"arp_outpaint/{safe_stem(source.name)}_{aspect_slug(args.target_aspect)}_{work_width}x{work_height}"
@@ -1281,6 +1288,8 @@ def main() -> int:
         "--gamma",
         str(args.gamma),
     ]
+    if args.outpaint_all_black_regions:
+        finalize_command.append("--skip-restore")
     if args.force:
         finalize_command.append("--force")
     if args.dry_run:

@@ -725,7 +725,9 @@ def ensure_source_section_clip(settings: dict) -> str:
         "-t",
         f"{max(0.041, end - start):.3f}",
         "-map",
-        "0",
+        "0:v:0",
+        "-map",
+        "0:a?",
         "-c:v",
         "libx264",
         "-crf",
@@ -734,6 +736,12 @@ def ensure_source_section_clip(settings: dict) -> str:
         "veryfast",
         "-c:a",
         "copy",
+        "-sn",
+        "-dn",
+        "-map_metadata",
+        "-1",
+        "-movflags",
+        "+faststart",
         str(partial),
     ]
     result = subprocess.run(command, check=False, capture_output=True, text=True)

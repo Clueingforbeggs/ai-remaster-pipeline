@@ -115,7 +115,7 @@ def qwen_masked_workflow_for(values: dict[str, str], config: dict[str, str]) -> 
 
 def load_settings() -> dict[str, dict[str, str]]:
     defaults = {stage.key: {key: default for key, _label, _kind, default in stage.fields} for stage in STAGES}
-    defaults["global"] = {"source": "", "expand_outpaint": "true", "colorize": "true", "section_start": "0", "section_end": "", "last_browse_dir": ""}
+    defaults["global"] = {"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "section_start": "0", "section_end": "", "last_browse_dir": ""}
     app_module = sys.modules.get("ai_remaster_gui.app")
     settings_file = getattr(app_module, "SETTINGS_FILE", SETTINGS_FILE)
     newest_fn = getattr(app_module, "newest", newest) if app_module else newest

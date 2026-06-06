@@ -90,7 +90,7 @@ def source_placement_size(args, info: dict, target_width: int, target_height: in
 
 def signature(args, source: Path, info: dict, target_width: int, target_height: int) -> dict:
     return {
-        'version': 6,
+        'version': 7,
         'tool': 'prepare_outpaint_input.py',
         'source': root_relative(source),
         'source_fingerprint': file_fingerprint(source),
@@ -107,6 +107,7 @@ def signature(args, source: Path, info: dict, target_width: int, target_height: 
         'crop_bottom': max(0, int(args.crop_bottom)),
         'black_lift': args.black_lift,
         'gamma': args.gamma,
+        'outpaint_all_black_regions': bool(getattr(args, 'outpaint_all_black_regions', False)),
         'encoder': args.encoder,
         'crf': args.crf,
         'preset': args.preset,
@@ -117,7 +118,9 @@ def build_filter(args, info: dict, target_width: int, target_height: int) -> str
     lift = max(0.0, min(0.25, args.black_lift))
     gamma = max(0.1, args.gamma)
     left, _right, top, _bottom, crop_width, crop_height = crop_values(args, info)
-    # The source image is lifted away from exact 0 before padding. The synthetic 16:9 margins stay exact black.
+    # By default the source image is lifted away from exact 0 before padding. The synthetic
+    # margins stay exact black. In all-black-regions mode, source blacks are left alone so
+    # embedded matte bars/black restoration gaps can be treated like outpaintable padding.
     lut = f"r=255*({lift}+(1-{lift})*pow(val/255\\,1/{gamma})):g=255*({lift}+(1-{lift})*pow(val/255\\,1/{gamma})):b=255*({lift}+(1-{lift})*pow(val/255\\,1/{gamma}))"
     # trim=start_frame=0,setpts=PTS-STARTPTS normalises the source timestamps to begin at t=0.
     # Without this, videos with a non-zero initial PTS (common with H.264, interlaced sources,
@@ -136,9 +139,13 @@ def build_filter(args, info: dict, target_width: int, target_height: int) -> str
     scale_steps = f"scale=w={delivery_source_w}:h={delivery_source_h}:flags=lanczos"
     if (delivery_source_w, delivery_source_h) != (target_source_w, target_source_h):
         scale_steps += f",scale=w={target_source_w}:h={target_source_h}:flags=lanczos"
+    source_filters = f"[0:v]trim=start_frame=0,setpts=PTS-STARTPTS,crop=w={crop_width}:h={crop_height}:x={left}:y={top},{scale_steps},setsar=1,format=rgb24"
+    if not getattr(args, 'outpaint_all_black_regions', False):
+        source_filters += f",lutrgb={lut}"
+    source_filters += "[src]"
     return ';'.join([
         f"color=c=black:s={target_width}x{target_height}:r={info['fps']:.8f}[bg]",
-        f"[0:v]trim=start_frame=0,setpts=PTS-STARTPTS,crop=w={crop_width}:h={crop_height}:x={left}:y={top},{scale_steps},setsar=1,format=rgb24,lutrgb={lut}[src]",
+        source_filters,
         '[bg][src]overlay=x=(W-w)/2:y=(H-h)/2:shortest=1:format=auto,format=yuv420p[v]',
     ])
 
@@ -180,6 +187,7 @@ def build_parser():
     parser.add_argument('--crop-bottom', type=int, default=0, help='Pixels to crop from the source before padding.')
     parser.add_argument('--black-lift', type=float, default=0.018, help='Raise source pixels away from pure black before padding. 0.018 is about 5/255.')
     parser.add_argument('--gamma', type=float, default=1.06, help='Additional source gamma lift before padding. Values above 1 brighten shadows.')
+    parser.add_argument('--outpaint-all-black-regions', action='store_true', help='Do not lift source blacks. Pure black regions inside the source can be outpainted like padded margins.')
     parser.add_argument('--encoder', choices=['h264', 'prores'], default='h264')
     parser.add_argument('--crf', type=int, default=12)
     parser.add_argument('--preset', default='medium')
@@ -226,7 +234,8 @@ def main():
         str(partial),
     ]
     print(f"Source: {info['width']}x{info['height']} {info['fps']:.6g}fps {format_time(info['duration'])}", flush=True)
-    print(f'Prepared canvas: {target_width}x{target_height}, crop LRTB={args.crop_left},{args.crop_right},{args.crop_top},{args.crop_bottom}, black_lift={args.black_lift}, gamma={args.gamma}', flush=True)
+    mode = 'all black regions' if args.outpaint_all_black_regions else 'protected source blacks'
+    print(f'Prepared canvas: {target_width}x{target_height}, crop LRTB={args.crop_left},{args.crop_right},{args.crop_top},{args.crop_bottom}, black_lift={args.black_lift}, gamma={args.gamma}, mode={mode}', flush=True)
     print(' '.join(command), flush=True)
     if args.dry_run:
         return 0

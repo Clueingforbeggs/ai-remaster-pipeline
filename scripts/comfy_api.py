@@ -64,6 +64,7 @@ def ensure_node_types(comfy_url: str, required: dict[str, str], context: str = "
         "ComfyUI-LTXVideo": "https://github.com/Lightricks/ComfyUI-LTXVideo -> ComfyUI/custom_nodes/ComfyUI-LTXVideo",
         "ComfyUI-GGUF": "https://github.com/city96/ComfyUI-GGUF -> ComfyUI/custom_nodes/ComfyUI-GGUF",
         "ComfyUI-VideoHelperSuite": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite -> ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
+        "ComfyUI-FlashVSR_Ultra_Fast": "https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast -> ComfyUI/custom_nodes/ComfyUI-FlashVSR_Ultra_Fast",
         "ComfyUI-Reference-Based-Video-Colorization": "https://github.com/jonstreeter/ComfyUI-Reference-Based-Video-Colorization -> ComfyUI/custom_nodes/reference-video-colorization",
     }
     hints = "; ".join(install_hints.get(package, package) for package in sorted(set(required[node_type] for node_type in missing)))

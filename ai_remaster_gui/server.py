@@ -246,13 +246,21 @@ class PipelineApp:
     def outpaint_enabled(self) -> bool:
         return self.settings.get("global", {}).get("expand_outpaint", "true") == "true"
 
+    def upscale_enabled(self) -> bool:
+        return self.settings.get("global", {}).get("upscale", "false") == "true"
+
     def active_stages(self) -> tuple[Stage, ...]:
-        stages = tuple(stage for stage in STAGES if stage.key != "output")
-        if not self.outpaint_enabled():
-            stages = tuple(stage for stage in stages if stage.key != "outpaint")
+        by_key = {stage.key: stage for stage in STAGES}
+        stages: list[Stage] = []
+        if self.outpaint_enabled():
+            stages.append(by_key["outpaint"])
         if self.colorize_enabled():
-            return stages
-        return tuple(stage for stage in stages if stage.key not in COLORIZE_STAGE_KEYS)
+            stages.extend(by_key[key] for key in ("shots", "references", "colour"))
+        if self.outpaint_enabled() or self.colorize_enabled():
+            stages.append(by_key["recomp"])
+        if self.upscale_enabled():
+            stages.append(by_key["upscale"])
+        return tuple(stages)
 
     def save(self) -> None:
         SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2) + "\n", encoding="utf-8")
@@ -434,6 +442,18 @@ class PipelineApp:
                 percent, label = 100, "Composite written"
             else:
                 label = "Compositing"
+        elif self.running_stage_key == "upscale":
+            label = "Upscaling"
+            milestones = [
+                ("queueing flashvsr", 20, "Queueing FlashVSR in ComfyUI"),
+                ("queued comfyui prompt", 40, "Queued in ComfyUI"),
+                ("sending prompt nodes", 42, "Sending FlashVSR prompt"),
+                ("wrote upscaled video", 100, "Upscaled video written"),
+                ("reuse upscaled video", 100, "Upscaled video ready"),
+            ]
+            for token, value, text in milestones:
+                if token in lower and value >= percent:
+                    percent, label = value, text
         return {"key": self.running_stage_key, "stage": self.running_stage, "percent": percent, "label": label}
 
     def state(self, view: str = "") -> dict:
@@ -455,6 +475,8 @@ class PipelineApp:
                 "phase_progress": self.phase_progress(),
                 "expected_outputs": {stage.key: self.expected_outputs(stage.key) for stage in (*self.active_stages(), output_stage())},
                 "existing_outputs": {stage.key: self.existing_outputs(stage.key) for stage in (*self.active_stages(), output_stage())},
+                "upscale_preview": self.upscale_preview_state(),
+                "output_selection": self.output_selection_state(),
                 "source_previews": source_media["previews"],
                 "source_info": source_media["info"],
                 "source_section": section,
@@ -477,18 +499,23 @@ class PipelineApp:
             }
 
     def update_settings(self, stage: str, values: dict[str, str]) -> None:
+        previous_source = self.settings.get("global", {}).get("source", "") if stage == "global" else ""
         if stage == "global" and "source" in values:
             source = resolve_video_source(str(values.get("source", "")))
             if source.exists() and str(source) != str(values.get("source", "")):
                 values = dict(values)
                 values["source"] = str(source)
                 self.log.append(f"Resolved source material path to: {source}")
+            if str(values.get("source", "")) != previous_source:
+                values = dict(values)
+                values["section_start"] = "0"
+                values["section_end"] = source_duration_text(source) if source.exists() else ""
         self.settings.setdefault(stage, {}).update({key: str(value) for key, value in values.items()})
         if stage == "global" and {"source", "section_start", "section_end"} & set(values):
             self.log.append(f"Loading source material: {values.get('source')}")
             self.clear_derived_stage_inputs()
             self.hydrate_stage_inputs("global")
-        elif stage == "global" and ({"colorize", "expand_outpaint"} & set(values)):
+        elif stage == "global" and ({"colorize", "expand_outpaint", "upscale"} & set(values)):
             self.hydrate_stage_inputs("global")
         elif stage == "colour" and "method" in values:
             if values.get("method") in {"deepexemplar", "colormnet"}:
@@ -607,7 +634,7 @@ class PipelineApp:
             self.save()
 
     def clear_overview(self) -> None:
-        self.settings.setdefault("global", {}).update({"source": "", "expand_outpaint": "true", "colorize": "true", "section_start": "0", "section_end": ""})
+        self.settings.setdefault("global", {}).update({"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "section_start": "0", "section_end": ""})
         self.clear_derived_stage_inputs()
         self.log.append("Cleared source material from the Overview.")
         self.save()
@@ -648,6 +675,7 @@ class PipelineApp:
             "references": ("manifest", "outpainted_video", "colorized_video"),
             "colour": ("manifest", "outpainted_video", "colorized_video"),
             "recomp": ("outpainted_video", "source", "colorized_video", "output", "manifest"),
+            "upscale": ("input_video", "output"),
             "output": ("output", "outpainted_video", "manifest", "colorized_video"),
         }.items():
             stage_settings = self.settings.setdefault(stage_key, {})
@@ -671,7 +699,7 @@ class PipelineApp:
             if completed_stage == "global" and not (expected_outpainted and expected_outpainted.exists()):
                 outpainted = None
             else:
-                outpainted = expected_outpainted if expected_outpainted and expected_outpainted.exists() else newest(ROOT / "intermediate" / "outpainted", VIDEO_EXTS)
+                outpainted = expected_outpainted if expected_outpainted and expected_outpainted.exists() else None
             if outpainted:
                 outpainted_text = rel(outpainted)
                 self.settings.setdefault("shots", {})["outpainted_video"] = outpainted_text
@@ -681,7 +709,7 @@ class PipelineApp:
                 self.settings.setdefault("colour", {})["manifest"] = manifest
                 self.settings.setdefault("recomp", {})["manifest"] = manifest
                 self.log.append(f"Updated Shot Detection input: {outpainted_text}")
-        if self.outpaint_enabled() and not outpainted and completed_stage == "global":
+        if self.outpaint_enabled() and not outpainted:
             for stage_key in ("shots", "recomp"):
                 self.settings.setdefault(stage_key, {})["outpainted_video"] = ""
             for stage_key in ("references", "colour", "recomp"):
@@ -713,7 +741,15 @@ class PipelineApp:
         output = recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
         if output:
             self.settings.setdefault("recomp", {})["output"] = output
-            self.settings.setdefault("output", {})["output"] = output
+        upscale_input = self.upscale_input_for()
+        if upscale_input:
+            self.settings.setdefault("upscale", {})["input_video"] = upscale_input
+            upscale_output = upscale_output_for(upscale_input, self.settings.get("upscale", {}))
+            if upscale_output:
+                self.settings.setdefault("upscale", {})["output"] = upscale_output
+        selected = self.output_selection_state().get("path", "")
+        if selected:
+            self.settings.setdefault("output", {})["output"] = selected
         self.save()
 
     def expected_outputs(self, stage_key: str) -> list[str]:
@@ -731,9 +767,14 @@ class PipelineApp:
         if stage_key == "colour":
             return colorized_outputs_for_manifest(values.get("manifest", ""), values.get("method", "deepexemplar"))
         if stage_key == "recomp":
-            return [values.get("output") or recomposition_output_for(values.get("outpainted_video", ""))]
+            output = values.get("output") or recomposition_output_for(values.get("outpainted_video", ""))
+            return [output] if output else []
+        if stage_key == "upscale":
+            source = self.upscale_input_for() or values.get("input_video")
+            output = upscale_output_for(source, values) or values.get("output")
+            return [output] if output else []
         if stage_key == "output":
-            output = self.settings.get("recomp", {}).get("output") or recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
+            output = self.output_selection_state().get("path", "")
             return [output] if output else []
         return []
 
@@ -760,6 +801,8 @@ class PipelineApp:
                 add(["--guide-strength", values.get("guide_strength", "0.7")])
             if values.get("guide_end_strength"):
                 add(["--guide-end-strength", values.get("guide_end_strength", "1.0")])
+            if values.get("outpaint_all_black_regions", "false") == "true":
+                add(["--outpaint-all-black-regions"])
             manifest = outpaint_chunk_manifest_for(pipeline_source_text(self.settings), values)
             if manifest:
                 add(["--chunk-manifest", manifest])
@@ -844,6 +887,12 @@ class PipelineApp:
             height_text = outpaint_values.get("target_height", "720")
             delivery_w, delivery_h = outpaint_size_for_source(source_text, aspect, height_text)
             add(["--output-width", str(delivery_w), "--output-height", str(delivery_h)])
+        elif stage_key == "upscale":
+            source = self.upscale_input_for() or values.get("input_video")
+            output = upscale_output_for(source, values) or values.get("output")
+            if not source or not output:
+                return []
+            cmd = self.upscale_command(values, source, output)
         if values.get("force") == "true":
             cmd.append("--force")
         if values.get("dry_run") == "true":
@@ -854,8 +903,16 @@ class PipelineApp:
         if stage_key == "outpaint" and not self.outpaint_enabled():
             return False, "Expand using Outpainting is disabled on the Overview tab."
         if stage_key in COLORIZE_STAGE_KEYS and not self.colorize_enabled():
-            return False, "Colorize is disabled on the Global tab."
+            return False, "Colorize is disabled on the Overview tab."
+        if stage_key == "recomp" and not (self.outpaint_enabled() or self.colorize_enabled()):
+            return False, "Recomposition is only needed when Outpainting or Colorize is enabled."
+        if stage_key == "upscale" and not self.upscale_enabled():
+            return False, "Upscale is disabled on the Overview tab."
         stage = next(item for item in STAGES if item.key == stage_key)
+        if stage_key == "upscale":
+            self.hydrate_stage_inputs("upscale")
+            if not self.upscale_input_for():
+                return False, "Upscaling input is not available yet. Choose source material, or run Recomposition first when earlier phases are enabled."
         values = self.settings[stage_key]
         missing = [key for key in stage.required if not values.get(key)]
         if stage_key == "outpaint" and not self.settings.get("global", {}).get("source"):
@@ -868,7 +925,15 @@ class PipelineApp:
             self.ensure_pipeline_source()
         except Exception as exc:
             return False, f"Could not prepare selected source section: {exc}"
-        needs_comfy = stage_key in {"outpaint", "colour"} or (stage_key == "references" and values.get("method", "qwen") != "openai")
+        if stage_key == "upscale":
+            source_text = self.upscale_input_for()
+            if not source_text or not resolve(source_text).exists():
+                return False, "Upscaling input is not available yet. Run Recomposition first when earlier phases are enabled."
+        needs_comfy = (
+            stage_key in {"outpaint", "colour"}
+            or (stage_key == "references" and values.get("method", "qwen") != "openai")
+            or stage_key == "upscale"
+        )
         if needs_comfy:
             ok, message = ensure_comfy_available_for_stage(stage.title)
             if not ok:
@@ -1111,6 +1176,114 @@ class PipelineApp:
             ).start()
         return True, f"Started Qwen guide frame generation for chunk {chunk_index + 1}, guide {guide_index}."
 
+    def upscale_input_for(self) -> str:
+        if self.outpaint_enabled() or self.colorize_enabled():
+            recomposed = self.settings.get("recomp", {}).get("output") or recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
+            return recomposed
+        return pipeline_source_text(self.settings)
+
+    def upscale_command(self, values: dict[str, str], source: str, output: str) -> list[str]:
+        config = current_config()
+        cmd = [sys.executable, "-u", str(SCRIPTS / "upscale_video.py")]
+        add = cmd.extend
+        add(["--input", source])
+        add(["--target-width", str(values.get("target_width", "3840")), "--target-height", str(values.get("target_height", "2160"))])
+        add(["--output", output])
+        add(["--comfy-dir", config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))])
+        add(["--comfy-url", config.get("comfy_url", "http://127.0.0.1:8188")])
+        add(["--comfy-output-root", str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output")])
+        add(["--flashvsr-model", values.get("flashvsr_model", "FlashVSR-v1.1")])
+        add(["--flashvsr-mode", values.get("flashvsr_mode", "tiny")])
+        add(["--flashvsr-scale", values.get("flashvsr_scale", "2")])
+        add(["--flashvsr-seed", values.get("flashvsr_seed", "0")])
+        add(["--flashvsr-tiled-vae" if values.get("flashvsr_tiled_vae", "true") == "true" else "--no-flashvsr-tiled-vae"])
+        add(["--flashvsr-tiled-dit" if values.get("flashvsr_tiled_dit", "true") == "true" else "--no-flashvsr-tiled-dit"])
+        if values.get("flashvsr_unload_dit", "false") == "true":
+            add(["--flashvsr-unload-dit"])
+        return [part for part in cmd if part != ""]
+
+    def upscale_preview_state(self) -> dict[str, str]:
+        values = self.settings.get("upscale", {})
+        preview_source = values.get("preview_source", "")
+        preview_output = values.get("preview_output", "")
+        if preview_source and preview_output and resolve(preview_output).exists():
+            return {"source": preview_source, "output": preview_output, "exists": "true"}
+        source = self.upscale_input_for() or values.get("input_video")
+        output = upscale_preview_output_for(source, values)
+        exists = bool(output and resolve(output).exists())
+        return {"source": source, "output": output, "exists": "true" if exists else "false"}
+
+    def output_selection_state(self) -> dict[str, str]:
+        upscale = self.settings.get("upscale", {})
+        upscale_output = upscale_output_for(self.upscale_input_for() or upscale.get("input_video"), upscale) or upscale.get("output")
+        recomposed = self.settings.get("recomp", {}).get("output") or recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
+        if upscale_output and resolve(upscale_output).exists():
+            return {"path": upscale_output, "kind": "upscaled", "label": "Upscaled output"}
+        if recomposed and resolve(recomposed).exists():
+            return {"path": recomposed, "kind": "recomposed", "label": "Recomposed output"}
+        if self.upscale_enabled() and upscale_output:
+            return {"path": upscale_output, "kind": "upscaled_pending", "label": "Pending upscaled output"}
+        if recomposed:
+            return {"path": recomposed, "kind": "recomposed_pending", "label": "Pending recomposed output"}
+        return {"path": "", "kind": "", "label": ""}
+
+    def run_upscale_preview(self) -> tuple[bool, str]:
+        values = self.settings.get("upscale", {})
+        source_text = self.upscale_input_for() or values.get("input_video")
+        if not source_text:
+            return False, "Choose a source and enable Upscale before generating a preview."
+        seconds = max(0.1, float(values.get("preview_seconds", "6") or 6))
+        try:
+            source, start, end, key = self.upscale_preview_clip_source(seconds)
+            if not source.exists():
+                return False, f"Upscale preview input does not exist yet: {rel(source)}"
+            clip = media_clip_path(source, start, end, key)
+            output = upscale_preview_output_for(rel(clip), values)
+            cmd = self.upscale_command(values, rel(clip), output)
+        except Exception as exc:
+            return False, f"Could not prepare upscale preview: {exc}"
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return False, "A command is already running."
+            self.running_stage = "Upscale Preview"
+            self.running_stage_key = "upscale"
+            self.run_started_at = time.time()
+            values["preview_source"] = rel(clip)
+            values["preview_output"] = output
+            self.save()
+            self.log.append(f"Generating upscale preview: {output}")
+            self.log.append("> " + redact_command_for_log(cmd))
+            kwargs: dict = {"cwd": ROOT, "text": True, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kwargs["start_new_session"] = True
+            try:
+                self.process = subprocess.Popen(cmd, **kwargs)
+            except Exception as exc:
+                self.running_stage = ""
+                self.running_stage_key = ""
+                self.run_started_at = 0.0
+                self.log.append(f"Could not start upscale preview: {exc}")
+                return False, f"Could not start upscale preview: {exc}"
+            threading.Thread(target=self._collect_output, args=("upscale_preview",), daemon=True).start()
+        return True, "Started upscale preview."
+
+    def upscale_preview_clip_source(self, preview_seconds: float) -> tuple[Path, float, float, str]:
+        if not (self.outpaint_enabled() or self.colorize_enabled()):
+            global_settings = self.settings.get("global", {})
+            source_text = global_settings.get("source", "")
+            source = resolve_video_source(source_text)
+            if source_section_is_active(self.settings):
+                start = section_float(global_settings.get("section_start", "0"), 0.0)
+                section_end = section_float(global_settings.get("section_end", ""), start + preview_seconds)
+                end = min(section_end, start + preview_seconds) if section_end > start else start + preview_seconds
+                return source, start, end, f"upscale_preview_src_{start:.3f}_{end:.3f}"
+            return source, 0.0, preview_seconds, f"upscale_preview_src_{preview_seconds:.3f}"
+
+        source_text = self.upscale_input_for() or self.settings.get("upscale", {}).get("input_video", "")
+        return resolve(source_text), 0.0, preview_seconds, f"upscale_preview_{preview_seconds:.3f}"
+
     def run_guide_edit_preview(self, chunk_index: int, guide_index: int, instruction: str, mask_data: str = "", sampled_color: str = "") -> tuple[bool, str, str]:
         ok, message = ensure_comfy_available_for_stage("Guide Frame Editing")
         if not ok:
@@ -1199,8 +1372,10 @@ class PipelineApp:
             self.running_reference_manifest = ""
             self.running_reference_index = None
             self.run_started_at = 0.0
-            if code == 0:
+            if code == 0 and stage_key != "upscale_preview":
                 self.hydrate_stage_inputs(stage_key)
+            elif code == 0 and stage_key == "upscale_preview":
+                self.log.append("Upscale preview ready.")
 
     def stop(self) -> None:
         with self.lock:
@@ -1273,7 +1448,47 @@ def outpaint_output_for(source_text: str, aspect: str, target_height_text: str =
     values = APP.settings.get("outpaint", {}) if "APP" in globals() else {}
     crops = [int(float(values.get(key, "0") or 0)) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
     crop = "" if not any(crops) else f"_crop{crops[0]}-{crops[1]}-{crops[2]}-{crops[3]}"
-    return rel(ROOT / "intermediate" / "outpainted" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{crop}_outpainted.mp4")
+    black_region = "_allblack" if values.get("outpaint_all_black_regions", "false") == "true" else ""
+    return rel(ROOT / "intermediate" / "outpainted" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{crop}{black_region}_outpainted.mp4")
+
+
+def upscale_target_size(values: dict[str, str]) -> tuple[int, int]:
+    try:
+        width = even_int(int(float(values.get("target_width", "3840") or 3840)))
+    except ValueError:
+        width = 3840
+    try:
+        height = even_int(int(float(values.get("target_height", "2160") or 2160)))
+    except ValueError:
+        height = 2160
+    return max(2, width), max(2, height)
+
+
+def upscale_output_for(source_text: str, values: dict[str, str]) -> str:
+    if not source_text:
+        return ""
+    source = resolve(source_text)
+    width, height = upscale_target_size(values)
+    method = "flashvsr"
+    return rel(ROOT / "output" / "upscaled" / f"{safe_stem(source.name)}_{method}_{width}x{height}.mp4")
+
+
+def upscale_preview_output_for(source_text: str, values: dict[str, str]) -> str:
+    if not source_text:
+        return ""
+    source = resolve(source_text)
+    width, height = upscale_target_size(values)
+    method = "flashvsr"
+    seconds = safe_stem(str(values.get("preview_seconds", "6") or "6"))
+    return rel(ROOT / "output" / "upscaled" / "previews" / f"{safe_stem(source.name)}_{method}_{width}x{height}_preview_{seconds}s.mp4")
+
+
+def source_duration_text(source: Path) -> str:
+    try:
+        duration = float(video_metrics(source).get("duration") or 0)
+    except Exception:
+        return ""
+    return f"{duration:.3f}" if duration > 0 else ""
 
 
 def outpaint_size_for(aspect: str, target_height_text: str = "720") -> tuple[int, int]:
@@ -1324,11 +1539,15 @@ def outpaint_crop_slug(values: dict[str, str]) -> str:
     return "" if not any(crops) else f"_crop{crops[0]}-{crops[1]}-{crops[2]}-{crops[3]}"
 
 
+def outpaint_black_region_slug(values: dict[str, str]) -> str:
+    return "_allblack" if values.get("outpaint_all_black_regions", "false") == "true" else ""
+
+
 def outpaint_chunk_dir_for(source_text: str, values: dict[str, str]) -> Path:
     source = resolve_video_source(source_text)
     aspect = values.get("target_aspect", "16:9")
     width, height = outpaint_work_size_for_source(source_text, aspect, values.get("target_height", "720"))
-    return ROOT / ".cache" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}"
+    return ROOT / ".cache" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}{outpaint_black_region_slug(values)}"
 
 
 def outpaint_chunk_manifest_for(source_text: str, values: dict[str, str]) -> str:
@@ -1337,7 +1556,7 @@ def outpaint_chunk_manifest_for(source_text: str, values: dict[str, str]) -> str
     source = resolve_video_source(source_text)
     aspect = values.get("target_aspect", "16:9")
     width, height = outpaint_work_size_for_source(source_text, aspect, values.get("target_height", "720"))
-    return rel(ROOT / "manifests" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}_chunks.csv")
+    return rel(ROOT / "manifests" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}{outpaint_black_region_slug(values)}_chunks.csv")
 
 
 def outpaint_chunk_offset_slug(row: dict[str, str]) -> str:
@@ -1356,7 +1575,8 @@ def outpaint_prepared_for(source_text: str, values: dict[str, str]) -> Path:
     work_w, work_h = outpaint_work_size_for_source(source_text, aspect, height_text)
     del_w, del_h = outpaint_size_for_source(source_text, aspect, height_text)
     delivery_tag = f"_from{del_w}x{del_h}" if (del_w != work_w or del_h != work_h) else ""
-    return ROOT / "intermediate" / "outpaint_prepared" / f"{source.stem}_{work_w}x{work_h}{delivery_tag}{outpaint_crop_slug(values)}_lifted.mp4"
+    mode_tag = "_allblack" if values.get("outpaint_all_black_regions", "false") == "true" else "_lifted"
+    return ROOT / "intermediate" / "outpaint_prepared" / f"{source.stem}_{work_w}x{work_h}{delivery_tag}{outpaint_crop_slug(values)}{mode_tag}.mp4"
 
 
 def ensure_outpaint_prepared_canvas(source_text: str, values: dict[str, str]) -> Path:
@@ -1395,6 +1615,8 @@ def ensure_outpaint_prepared_canvas(source_text: str, values: dict[str, str]) ->
         "--delivery-height",
         str(outpaint_size_for_source(source_text, values.get("target_aspect", "16:9"), values.get("target_height", "720"))[1]),
     ]
+    if values.get("outpaint_all_black_regions", "false") == "true":
+        cmd.append("--outpaint-all-black-regions")
     APP.log.append(f"Preparing expanded canvas for guide frame: {rel(prepared)}")
     APP.log.append("> " + " ".join(cmd))
     result = subprocess.run(cmd, cwd=ROOT, check=False, capture_output=True, text=True)

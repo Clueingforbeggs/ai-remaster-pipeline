@@ -52,6 +52,7 @@ function fieldHtml(st, field) {
 
   if (kind.startsWith('select:')) return selectFieldHtml(key, label, kind, value);
   if (kind.startsWith('range:')) return rangeFieldHtml(key, label, kind, value);
+  if (kind === 'checkbox') return checkboxFieldHtml(key, label, value);
 
   const input = `
     <input data-field="${key}" data-kind="${kind}" type="${kind === 'number' ? 'number' : 'text'}" step="any" value="${esc(value)}">
@@ -122,6 +123,15 @@ function rangeFieldHtml(key, label, kind, value) {
       oninput="setRangeFieldValue('${key}',this.value,false)"
     >
     ${controls}
+  `;
+}
+
+function checkboxFieldHtml(key, label, value) {
+  return `
+    <label class="checkbox-field">
+      <input data-field="${key}" data-kind="checkbox" type="checkbox" ${value === 'true' ? 'checked' : ''}>
+      ${esc(label)}
+    </label>
   `;
 }
 
