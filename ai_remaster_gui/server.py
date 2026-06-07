@@ -1253,6 +1253,8 @@ class PipelineApp:
         add(["--flashvsr-mode", values.get("flashvsr_mode", "tiny")])
         add(["--flashvsr-scale", values.get("flashvsr_scale", "2")])
         add(["--flashvsr-seed", values.get("flashvsr_seed", "0")])
+        add(["--chunk-seconds", values.get("chunk_seconds", "6")])
+        add(["--overlap-frames", values.get("overlap_frames", "8")])
         add(["--flashvsr-tiled-vae" if values.get("flashvsr_tiled_vae", "true") == "true" else "--no-flashvsr-tiled-vae"])
         add(["--flashvsr-tiled-dit" if values.get("flashvsr_tiled_dit", "true") == "true" else "--no-flashvsr-tiled-dit"])
         if values.get("flashvsr_unload_dit", "false") == "true":

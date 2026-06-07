@@ -1381,6 +1381,8 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("--flashvsr-tiled-vae", command)
         self.assertIn("--flashvsr-tiled-dit", command)
         self.assertNotIn("--flashvsr-unload-dit", command)
+        self.assertEqual(command[command.index("--chunk-seconds") + 1], "6")
+        self.assertEqual(command[command.index("--overlap-frames") + 1], "8")
         self.assertIn("scripts\\upscale_video.py", " ".join(command))
 
     def test_upscale_can_request_flashvsr_unload_dit(self) -> None:
@@ -1575,6 +1577,14 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(prompt["3"]["class_type"], "VHS_VideoCombine")
         self.assertEqual(prompt["3"]["inputs"]["images"], ["2", 0])
         self.assertEqual(prompt["3"]["inputs"]["audio"], ["1", 2])
+
+    def test_upscale_chunk_ranges_overlap_without_dropping_frames(self) -> None:
+        ranges = upscale_video.chunk_ranges(total_frames=100, fps=10.0, chunk_seconds=3.0, overlap_frames=4)
+
+        self.assertEqual(ranges, [(0, 30, 0), (26, 60, 4), (56, 90, 4), (86, 100, 4)])
+
+    def test_upscale_chunk_ranges_use_single_prompt_when_clip_fits(self) -> None:
+        self.assertEqual(upscale_video.chunk_ranges(total_frames=100, fps=25.0, chunk_seconds=6.0, overlap_frames=8), [(0, 0, 100)])
 
     def test_upscale_runs_after_recomposition_when_processing_is_enabled(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "true", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})

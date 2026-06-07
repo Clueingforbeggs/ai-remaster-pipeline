@@ -120,6 +120,8 @@ STAGES = (
             ("flashvsr_tiled_dit", "tiled_dit", "checkbox", "true"),
             ("flashvsr_unload_dit", "unload_dit", "checkbox", "false"),
             ("flashvsr_seed", "FlashVSR seed", "number", "0"),
+            ("chunk_seconds", "Chunk seconds", "number", "6"),
+            ("overlap_frames", "Overlap frames", "number", "8"),
             ("preview_seconds", "Preview seconds", "number", "6"),
         ),
         (),

@@ -161,7 +161,7 @@ function drawUpscale() {
 
 function upscaleMainFields(st) {
   const fieldKeys = ['flashvsr_model', 'flashvsr_mode', 'flashvsr_scale', 'flashvsr_tiled_vae', 'flashvsr_tiled_dit', 'flashvsr_unload_dit', 'flashvsr_seed'];
-  fieldKeys.push('target_width', 'target_height', 'preview_seconds');
+  fieldKeys.push('target_width', 'target_height', 'chunk_seconds', 'overlap_frames', 'preview_seconds');
   return fieldKeys
     .map(key => fieldHtml(st, st.fields.find(f => f[0] === key)))
     .join('');

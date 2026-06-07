@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,8 @@ def signature(args: argparse.Namespace, source: Path, output_width: int, output_
         "flashvsr_tiled_dit": args.flashvsr_tiled_dit,
         "flashvsr_unload_dit": args.flashvsr_unload_dit,
         "flashvsr_seed": args.flashvsr_seed,
+        "chunk_seconds": args.chunk_seconds,
+        "overlap_frames": args.overlap_frames,
         "fps": args.fps,
     }
 
@@ -60,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--flashvsr-unload-dit", dest="flashvsr_unload_dit", action="store_true", default=False)
     parser.add_argument("--no-flashvsr-unload-dit", dest="flashvsr_unload_dit", action="store_false")
     parser.add_argument("--flashvsr-seed", type=int, default=0)
+    parser.add_argument("--chunk-seconds", type=float, default=6.0, help="Upscale in chunks of roughly this many seconds. Use 0 to send the whole clip.")
+    parser.add_argument("--overlap-frames", type=int, default=8, help="Frames repeated before each chunk, then trimmed before stitching.")
     parser.add_argument("--fps", type=float, default=0.0)
     parser.add_argument("--ffmpeg", default="")
     parser.add_argument("--force", action="store_true")
@@ -167,6 +173,179 @@ def flashvsr_run(args: argparse.Namespace, source: Path, partial: Path, output_w
     return partial
 
 
+def chunk_ranges(total_frames: int, fps: float, chunk_seconds: float, overlap_frames: int) -> list[tuple[int, int, int]]:
+    if total_frames <= 0 or fps <= 0 or chunk_seconds <= 0:
+        return [(0, 0, total_frames)]
+    chunk_frames = max(1, int(round(chunk_seconds * fps)))
+    if chunk_frames >= total_frames:
+        return [(0, 0, total_frames)]
+    overlap = max(0, min(int(overlap_frames), chunk_frames - 1))
+    ranges: list[tuple[int, int, int]] = []
+    start = 0
+    while start < total_frames:
+        end = min(total_frames, start + chunk_frames)
+        source_start = max(0, start - overlap)
+        trim_start = start - source_start
+        ranges.append((source_start, end, trim_start))
+        if end >= total_frames:
+            break
+        start = end
+    return ranges
+
+
+def split_video_chunk(ffmpeg: str, source: Path, target: Path, start_frame: int, end_frame: int, fps: float, force: bool) -> None:
+    if target.exists() and not force:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    start_seconds = start_frame / fps
+    duration_seconds = max(1 / fps, (end_frame - start_frame) / fps)
+    partial = target.with_suffix(target.suffix + ".partial" + target.suffix)
+    command = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{start_seconds:.6f}",
+        "-t",
+        f"{duration_seconds:.6f}",
+        "-i",
+        str(source),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "16",
+        "-preset",
+        "veryfast",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(partial),
+    ]
+    subprocess.run(command, check=True)
+    replace_with_retry(partial, target, f"Upscale prepared chunk {target.name}")
+
+
+def normalize_chunk(ffmpeg: str, source: Path, target: Path, width: int, height: int, trim_start: int, force: bool) -> None:
+    if target.exists() and not force:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_suffix(target.suffix + ".partial" + target.suffix)
+    filters = []
+    if trim_start > 0:
+        filters.append(f"trim=start_frame={trim_start},setpts=PTS-STARTPTS")
+    filters.append(f"scale={width}:{height}:flags=lanczos,setsar=1")
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(source),
+        "-vf",
+        ",".join(filters),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-crf",
+        "16",
+        "-preset",
+        "slow",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(partial),
+    ]
+    subprocess.run(command, check=True)
+    replace_with_retry(partial, target, f"Upscale normalized chunk {target.name}")
+
+
+def stitch_chunks(ffmpeg: str, chunks: list[Path], source: Path, output: Path) -> None:
+    if not chunks:
+        raise RuntimeError("No upscale chunks were produced.")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    video_partial = output.with_suffix(output.suffix + ".video.partial" + output.suffix)
+    final_partial = output.with_suffix(output.suffix + ".partial" + output.suffix)
+    with tempfile.TemporaryDirectory(prefix="arp_upscale_concat_") as tmp_text:
+        list_file = Path(tmp_text) / "chunks.txt"
+        list_file.write_text("".join(f"file '{chunk.as_posix()}'\n" for chunk in chunks), encoding="utf-8")
+        subprocess.run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(video_partial)], check=True)
+    mux_command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_partial),
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(final_partial),
+    ]
+    subprocess.run(mux_command, check=True)
+    video_partial.unlink(missing_ok=True)
+    replace_with_retry(final_partial, output, "Upscaled output")
+
+
+def chunked_flashvsr_run(args: argparse.Namespace, source: Path, output: Path, output_width: int, output_height: int, info: dict[str, Any]) -> None:
+    ffmpeg = find_ffmpeg(args.ffmpeg)
+    fps = args.fps or float(info["fps"])
+    ranges = chunk_ranges(int(info["frames"]), fps, args.chunk_seconds, args.overlap_frames)
+    if len(ranges) <= 1:
+        raw_partial = output.with_suffix(output.suffix + ".flashvsr.partial" + output.suffix)
+        final_partial = output.with_suffix(output.suffix + ".partial" + output.suffix)
+        for path in (raw_partial, final_partial):
+            if path.exists():
+                path.unlink()
+        print(f"Queueing FlashVSR in ComfyUI: {source}", flush=True)
+        flashvsr_run(args, source, raw_partial, output_width, output_height)
+        if not raw_partial.exists():
+            raise RuntimeError(f"FlashVSR finished but did not create expected output: {raw_partial}")
+        raw_info = video_info(raw_partial)
+        if raw_info["width"] == output_width and raw_info["height"] == output_height:
+            replace_with_retry(raw_partial, final_partial, "Upscaled preview")
+        else:
+            scale_video(ffmpeg, raw_partial, final_partial, output_width, output_height)
+            raw_partial.unlink(missing_ok=True)
+        if output.exists():
+            output.unlink()
+        replace_with_retry(final_partial, output, "Upscaled output")
+        return
+
+    chunk_dir = ROOT / ".cache" / "upscale_chunks" / f"{safe_stem(source.name)}_flashvsr_{output_width}x{output_height}_{int(args.chunk_seconds * 1000)}ms_ov{max(0, args.overlap_frames)}"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Splitting upscaling into {len(ranges)} chunk(s): {args.chunk_seconds:g}s chunks, {max(0, args.overlap_frames)} overlap frame(s)", flush=True)
+    normalized_chunks: list[Path] = []
+    digits = max(4, int(math.log10(len(ranges))) + 1)
+    for index, (start_frame, end_frame, trim_start) in enumerate(ranges):
+        chunk_input = chunk_dir / f"input_{index:0{digits}d}_{start_frame:06d}_{end_frame:06d}.mp4"
+        chunk_raw = chunk_dir / f"raw_{index:0{digits}d}_{start_frame:06d}_{end_frame:06d}.mp4"
+        chunk_final = chunk_dir / f"final_{index:0{digits}d}_{start_frame:06d}_{end_frame:06d}.mp4"
+        print(f"Upscale chunk {index + 1}/{len(ranges)}: frames {start_frame}-{end_frame}, trim {trim_start}", flush=True)
+        split_video_chunk(ffmpeg, source, chunk_input, start_frame, end_frame, fps, args.force)
+        chunk_sig = signature(args, chunk_input, output_width, output_height)
+        if not args.force and resumable_output(chunk_final, chunk_sig, width=output_width, height=output_height):
+            print(f"Reuse upscaled chunk: {chunk_final}", flush=True)
+            normalized_chunks.append(chunk_final)
+            continue
+        flashvsr_run(args, chunk_input, chunk_raw, output_width, output_height)
+        normalize_chunk(ffmpeg, chunk_raw, chunk_final, output_width, output_height, trim_start, True)
+        write_signature(chunk_final, chunk_sig)
+        print(f"Wrote upscaled chunk: {chunk_final}", flush=True)
+        chunk_raw.unlink(missing_ok=True)
+        normalized_chunks.append(chunk_final)
+    if output.exists():
+        output.unlink()
+    stitch_chunks(ffmpeg, normalized_chunks, source, output)
+
+
 def fit_dimensions(source_width: int, source_height: int, target_width: int, target_height: int) -> tuple[int, int]:
     if target_width <= 0 and target_height <= 0:
         return source_width * 4, source_height * 4
@@ -218,26 +397,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    raw_partial = output.with_suffix(output.suffix + ".flashvsr.partial" + output.suffix)
-    final_partial = output.with_suffix(output.suffix + ".partial" + output.suffix)
-    for path in (raw_partial, final_partial):
-        if path.exists():
-            path.unlink()
-
-    print(f"Queueing FlashVSR in ComfyUI: {source}", flush=True)
-    flashvsr_run(args, source, raw_partial, output_width, output_height)
-
-    if not raw_partial.exists():
-        raise RuntimeError(f"FlashVSR finished but did not create expected output: {raw_partial}")
-    raw_info = video_info(raw_partial)
-    if raw_info["width"] == output_width and raw_info["height"] == output_height:
-        replace_with_retry(raw_partial, final_partial, "Upscaled preview")
-    else:
-        scale_video(find_ffmpeg(args.ffmpeg), raw_partial, final_partial, output_width, output_height)
-        raw_partial.unlink(missing_ok=True)
-    if output.exists():
-        output.unlink()
-    replace_with_retry(final_partial, output, "Upscaled output")
+    chunked_flashvsr_run(args, source, output, output_width, output_height, info)
     write_signature(output, sig)
     print(f"Wrote upscaled video: {output}", flush=True)
     return 0
