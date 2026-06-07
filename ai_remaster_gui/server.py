@@ -245,12 +245,7 @@ def source_defaults_for(source: Path, monochrome: bool | None = None, info: dict
 
 
 
-DEFAULT_ANCHOR_PROMPT = (
-    "Fill the black outpaint margins with a natural continuation of this black-and-white film frame. "
-    "Preserve the centre/original frame area, composition, lighting, paper, clothing, and background. "
-    "If hands or fingers extend into the new margins, make them anatomically natural with five fingers and normal joints. "
-    "Do not colorize. Do not add text, captions, logos, or unrelated new objects."
-)
+DEFAULT_ANCHOR_PROMPT = "Replace the black bars."
 
 
 

@@ -1141,13 +1141,46 @@ class GuiSmokeTests(unittest.TestCase):
             fake_state = {"manifest": app.rel(manifest), "rows": [{"index": 0}]}
             with mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value=fake_state):
                 unmasked, unmasked_output = app.guide_edit_preview_command(0, 0, "replace detail")
+                defaulted, _defaulted_output = app.guide_edit_preview_command(0, 0, "")
                 masked, masked_output = app.guide_edit_preview_command(0, 0, "replace detail", "iVBORw0KGgo=")
 
         self.assertIn("generate_single_reference.py", " ".join(unmasked))
         self.assertIn("edit_reference_image.py", " ".join(masked))
+        self.assertEqual(defaulted[defaulted.index("--prompt") + 1], "Replace the black bars.")
         self.assertIn("--mask", masked)
         self.assertIn("outpaint_guides", unmasked_output)
         self.assertIn("outpaint_guides", masked_output)
+
+    def test_outpaint_guide_generation_defaults_to_replace_black_bars(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            prepared = folder / "prepared.mp4"
+            source_frame = folder / "source.jpg"
+            prepared.write_bytes(b"prepared")
+            source_frame.write_bytes(b"source")
+            rows = [
+                {
+                    "chunk_index": "0",
+                    "start_frame": "0",
+                    "end_frame": "24",
+                    "start_seconds": "0",
+                    "end_seconds": "1",
+                }
+            ]
+            app.write_outpaint_chunk_rows(manifest, rows)
+            app.APP.settings["references"].update({"workflow": "workflows/qwen_image_edit/Image Edit (Qwen 2511).json"})
+            fake_state = {"manifest": app.rel(manifest), "rows": [{"index": 0, "fps": 24, "start": 0.0, "end": 1.0}]}
+
+            with (
+                mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value=fake_state),
+                mock.patch.object(outpaint_guides, "pipeline_source_text", return_value="input/example.mp4"),
+                mock.patch.object(outpaint_guides, "ensure_outpaint_prepared_canvas", return_value=prepared),
+                mock.patch.object(outpaint_guides, "chunk_frame_preview", return_value=app.rel(source_frame)),
+            ):
+                command, _output, _canvas, _seconds = app.outpaint_guide_generation_command(0, "")
+
+        self.assertEqual(command[command.index("--prompt") + 1], "Replace the black bars.")
 
     def test_masked_edit_uses_bundled_workflow_when_setting_is_empty(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:

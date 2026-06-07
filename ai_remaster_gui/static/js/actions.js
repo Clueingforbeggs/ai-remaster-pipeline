@@ -166,7 +166,7 @@ function openGuideEditor(chunkIndex, guideIndex, fallbackPath = '') {
   referenceEditor.samPoints = [];
   ensureReferenceEditorModal();
   document.getElementById('referenceEditTitle').textContent = `Chunk ${chunkIndex + 1} Guide ${guideIndex + 1} Editor`;
-  document.getElementById('referenceEditInstruction').value = 'Inpaint the masked area. Preserve the rest of the image.';
+  document.getElementById('referenceEditInstruction').value = DEFAULT_ANCHOR_PROMPT;
   document.getElementById('referenceEditSample').textContent = 'No colour sampled';
   document.getElementById('referenceEditPreview').innerHTML = missingImage('No preview yet');
   document.getElementById('referenceEditRecent').innerHTML = guideRecentHtml(row, guideIndex);
@@ -789,7 +789,7 @@ async function exportMedia(path) {
   if (result.saved) alert('Saved:\n' + result.saved);
 }
 
-const DEFAULT_ANCHOR_PROMPT = 'Fill the black outpaint margins with a natural continuation of this black-and-white film frame. Preserve the centre/original frame area, composition, lighting, paper, clothing, and background. If hands or fingers extend into the new margins, make them anatomically natural with five fingers and normal joints. Do not colorize. Do not add text, captions, logos, or unrelated new objects.';
+const DEFAULT_ANCHOR_PROMPT = 'Replace the black bars.';
 
 // ── Guide frame list actions ─────────────────────────────────────────────────
 
