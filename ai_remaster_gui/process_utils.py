@@ -37,6 +37,29 @@ def outpaint_chunk_progress(text: str) -> dict[str, int]:
         current = max(1, min(total, current or min(done + 1, total)))
     return {"done": done, "current": current, "total": total}
 
+
+def upscale_chunk_progress(text: str) -> dict[str, int]:
+    done = count_lines_matching(text, ("Wrote upscaled chunk", "Reuse upscaled chunk"))
+    total = 0
+    current = 0
+    for line in text.splitlines():
+        marker = "Upscale chunk "
+        if marker not in line:
+            continue
+        tail = line.split(marker, 1)[1].split(":", 1)[0]
+        if "/" not in tail:
+            continue
+        try:
+            left, right = tail.split("/", 1)
+            current = max(current, int(left.strip()))
+            total = max(total, int(right.strip()))
+        except ValueError:
+            pass
+    if total:
+        current = max(1, min(total, current or min(done + 1, total)))
+    return {"done": done, "current": current, "total": total}
+
+
 def outpaint_eta_label(elapsed: float, done: int, current: int, total: int) -> str:
     if total <= 0 or done >= total:
         return ""

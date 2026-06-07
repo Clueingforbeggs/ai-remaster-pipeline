@@ -268,7 +268,9 @@ def stitch_chunks(ffmpeg: str, chunks: list[Path], source: Path, output: Path) -
     with tempfile.TemporaryDirectory(prefix="arp_upscale_concat_") as tmp_text:
         list_file = Path(tmp_text) / "chunks.txt"
         list_file.write_text("".join(f"file '{chunk.as_posix()}'\n" for chunk in chunks), encoding="utf-8")
+        print(f"Stitching upscaled chunks: {len(chunks)} chunk(s)", flush=True)
         subprocess.run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(video_partial)], check=True)
+    print("Muxing original audio into upscaled video", flush=True)
     mux_command = [
         ffmpeg,
         "-y",

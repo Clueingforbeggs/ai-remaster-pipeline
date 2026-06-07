@@ -56,6 +56,7 @@ from .process_utils import (
     format_duration,
     outpaint_chunk_progress,
     outpaint_eta_label,
+    upscale_chunk_progress,
     terminate_process_tree,
 )
 from .references import (
@@ -490,15 +491,31 @@ class PipelineApp:
         elif self.running_stage_key == "upscale":
             label = "Upscaling"
             milestones = [
+                ("splitting upscaling into", 8, "Splitting into chunks"),
                 ("queueing flashvsr", 20, "Queueing FlashVSR in ComfyUI"),
                 ("queued comfyui prompt", 40, "Queued in ComfyUI"),
                 ("sending prompt nodes", 42, "Sending FlashVSR prompt"),
+                ("stitching upscaled chunks", 96, "Stitching upscaled chunks"),
+                ("muxing original audio", 98, "Muxing original audio"),
                 ("wrote upscaled video", 100, "Upscaled video written"),
                 ("reuse upscaled video", 100, "Upscaled video ready"),
             ]
             for token, value, text in milestones:
                 if token in lower and value >= percent:
                     percent, label = value, text
+            chunk = upscale_chunk_progress(log_text)
+            if chunk["total"] and percent < 100:
+                rendering = chunk["current"] > chunk["done"] and ("queued comfyui prompt" in lower or "sending prompt nodes" in lower)
+                active_fraction = 0.5 if rendering else 0.2 if chunk["current"] > chunk["done"] else 0.0
+                chunk_fraction = min(1.0, (chunk["done"] + active_fraction) / chunk["total"])
+                percent = max(percent, min(95, 10 + int(chunk_fraction * 85)))
+                eta = outpaint_eta_label(elapsed, chunk["done"], chunk["current"], chunk["total"])
+                if chunk["done"] >= chunk["total"]:
+                    label = "Upscale chunks complete, stitching"
+                elif rendering:
+                    label = f"Upscale chunk {chunk['current']}/{chunk['total']} rendering in ComfyUI ({chunk['done']} done){eta}"
+                else:
+                    label = f"Upscale chunk {chunk['current']}/{chunk['total']} ({chunk['done']} done){eta}"
         return {"key": self.running_stage_key, "stage": self.running_stage, "percent": percent, "label": label}
 
     def state(self, view: str = "") -> dict:
@@ -1263,14 +1280,17 @@ class PipelineApp:
 
     def upscale_preview_state(self) -> dict[str, str]:
         values = self.settings.get("upscale", {})
+        source = self.upscale_input_for() or values.get("input_video")
+        full_output = upscale_output_for(source, values) or values.get("output", "")
+        if source and full_output and resolve(full_output).exists():
+            return {"source": source, "output": full_output, "exists": "true", "kind": "output", "title": "Upscale Output"}
         preview_source = values.get("preview_source", "")
         preview_output = values.get("preview_output", "")
         if preview_source and preview_output and resolve(preview_output).exists():
-            return {"source": preview_source, "output": preview_output, "exists": "true"}
-        source = self.upscale_input_for() or values.get("input_video")
+            return {"source": preview_source, "output": preview_output, "exists": "true", "kind": "preview", "title": "Upscale Preview"}
         output = upscale_preview_output_for(source, values)
         exists = bool(output and resolve(output).exists())
-        return {"source": source, "output": output, "exists": "true" if exists else "false"}
+        return {"source": source, "output": output, "exists": "true" if exists else "false", "kind": "preview", "title": "Upscale Preview"}
 
     def output_selection_state(self) -> dict[str, str]:
         upscale = self.settings.get("upscale", {})

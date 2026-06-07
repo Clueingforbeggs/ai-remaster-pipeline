@@ -147,7 +147,7 @@ function drawUpscale() {
         <div class="command" id="cmd"></div>
       </section>
       <section class="card editor-viewer">
-        <h2>Upscale Preview</h2>
+        <h2>${esc(preview.title || 'Upscale Preview')}</h2>
         ${upscaleComparisonHtml(s, preview)}
       </section>
     </div>

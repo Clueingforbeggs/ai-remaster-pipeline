@@ -1454,9 +1454,12 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_upscale_preview_state_uses_generated_clip_output_pair(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            source = Path(tmp_text) / "source.mp4"
             clip = Path(tmp_text) / "preview-clip.mp4"
             output = app.ROOT / "output" / "upscaled" / "previews" / "preview-clip_flashvsr_1920x1080_preview_6s.mp4"
+            source.write_bytes(b"placeholder")
             clip.write_bytes(b"placeholder")
+            app.APP.settings["global"].update({"source": app.rel(source), "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(b"placeholder")
             app.APP.settings["upscale"].update({"preview_source": app.rel(clip), "preview_output": app.rel(output)})
@@ -1469,6 +1472,39 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(preview["source"], app.rel(clip))
         self.assertEqual(preview["output"], app.rel(output))
         self.assertEqual(preview["exists"], "true")
+
+    def test_upscale_preview_state_promotes_finished_output(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            source = Path(tmp_text) / "source.mp4"
+            preview_clip = Path(tmp_text) / "preview-clip.mp4"
+            source.write_bytes(b"placeholder")
+            preview_clip.write_bytes(b"placeholder")
+            app.APP.settings["global"].update({"source": app.rel(source), "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+            app.APP.settings["upscale"].update(
+                {
+                    "target_width": "1920",
+                    "target_height": "1080",
+                    "preview_source": app.rel(preview_clip),
+                    "preview_output": "output/upscaled/previews/stale_preview.mp4",
+                }
+            )
+            output = app.resolve(app.upscale_output_for(app.rel(source), app.APP.settings["upscale"]))
+            preview_output = app.resolve(app.APP.settings["upscale"]["preview_output"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            preview_output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"placeholder")
+            preview_output.write_bytes(b"placeholder")
+
+            try:
+                preview = app.APP.upscale_preview_state()
+            finally:
+                output.unlink(missing_ok=True)
+                preview_output.unlink(missing_ok=True)
+
+        self.assertEqual(preview["source"], app.rel(source))
+        self.assertEqual(preview["output"], app.rel(output))
+        self.assertEqual(preview["kind"], "output")
+        self.assertEqual(preview["title"], "Upscale Output")
 
     def test_upscale_preview_start_records_actual_clip_and_output(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
@@ -1643,6 +1679,57 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertIn("Chunk 2/3 rendering in ComfyUI (1 done), ETA", stage_progress["label"])
         self.assertIn("Chunk 2/3 rendering in ComfyUI", global_progress["label"])
+
+    def test_upscale_progress_surfaces_active_chunk_with_eta(self) -> None:
+        original_log = app.APP.log
+        app.APP.settings["global"].update({"expand_outpaint": "false", "colorize": "false", "upscale": "true"})
+        app.APP.running_stage_key = "upscale"
+        app.APP.running_stage = "Upscaling"
+        app.APP.run_started_at = time.time() - 180
+        app.APP.log = [
+            "Splitting upscaling into 12 chunk(s): 6s chunks, 8 overlap frame(s)",
+            "Upscale chunk 1/12: frames 0-144, trim 0",
+            "Wrote upscaled chunk: chunk_0001.mp4",
+            "Upscale chunk 2/12: frames 136-288, trim 8",
+            "Queued ComfyUI prompt: prompt-id",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertIn("Upscale chunk 2/12 rendering in ComfyUI (1 done), ETA", progress["label"])
+        self.assertGreater(progress["percent"], 10)
+        self.assertLess(progress["percent"], 100)
+
+    def test_upscale_progress_reports_stitching_after_chunks_complete(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "upscale"
+        app.APP.running_stage = "Upscaling"
+        app.APP.run_started_at = time.time() - 300
+        app.APP.log = [
+            "Splitting upscaling into 2 chunk(s): 6s chunks, 8 overlap frame(s)",
+            "Upscale chunk 1/2: frames 0-144, trim 0",
+            "Wrote upscaled chunk: chunk_0001.mp4",
+            "Upscale chunk 2/2: frames 136-288, trim 8",
+            "Wrote upscaled chunk: chunk_0002.mp4",
+            "Stitching upscaled chunks: 2 chunk(s)",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "Upscale chunks complete, stitching")
+        self.assertLess(progress["percent"], 100)
 
     def test_reference_progress_ignores_previous_stage_writes(self) -> None:
         original_log = app.APP.log
