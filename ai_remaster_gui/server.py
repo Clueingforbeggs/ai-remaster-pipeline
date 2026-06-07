@@ -197,6 +197,51 @@ def combine_outpaint_prompt(prompt: str, suffix: str) -> str:
     return f"{base}{separator}{extra}"
 
 
+def source_dimensions_from_info(info: dict[str, str]) -> tuple[int, int] | None:
+    resolution = str(info.get("resolution", ""))
+    if "x" not in resolution:
+        return None
+    left, right = resolution.lower().split("x", 1)
+    try:
+        width = int(float(left.strip()))
+        height = int(float(right.strip()))
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def source_workflow_defaults(info: dict[str, str], monochrome: bool | None = None) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    global_defaults: dict[str, str] = {}
+    stage_defaults: dict[str, dict[str, str]] = {}
+    dimensions = source_dimensions_from_info(info)
+    if dimensions:
+        width, height = dimensions
+        aspect = width / height
+        squareish = aspect <= (4 / 3) + 0.01
+        needs_upscale = height < 1080
+        global_defaults["expand_outpaint"] = "true" if squareish else "false"
+        global_defaults["upscale"] = "true" if needs_upscale else "false"
+        if squareish:
+            stage_defaults.setdefault("outpaint", {})["target_aspect"] = "16:9"
+        if needs_upscale:
+            stage_defaults.setdefault("upscale", {}).update({"target_width": "1920", "target_height": "1080"})
+    if monochrome is not None:
+        global_defaults["colorize"] = "true" if monochrome else "false"
+    return global_defaults, stage_defaults
+
+
+def source_defaults_for(source: Path, monochrome: bool | None = None, info: dict[str, str] | None = None) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    metadata = dict(info or {})
+    if not metadata:
+        try:
+            metadata.update(ffprobe_basic_info(source))
+        except Exception:
+            metadata = {}
+    return source_workflow_defaults(metadata, monochrome)
+
+
 
 
 DEFAULT_ANCHOR_PROMPT = (
@@ -510,6 +555,18 @@ class PipelineApp:
                 values = dict(values)
                 values["section_start"] = "0"
                 values["section_end"] = source_duration_text(source) if source.exists() else ""
+                if source.exists():
+                    global_defaults, stage_defaults = source_defaults_for(source)
+                    for key, value in global_defaults.items():
+                        values.setdefault(key, value)
+                    for stage_key, defaults in stage_defaults.items():
+                        self.settings.setdefault(stage_key, {}).update(defaults)
+                    if global_defaults:
+                        labels = [
+                            f"Outpainting {'on' if global_defaults.get('expand_outpaint') == 'true' else 'off'}",
+                            f"Upscaling {'on' if global_defaults.get('upscale') == 'true' else 'off'}",
+                        ]
+                        self.log.append(f"Applied source-based workflow defaults: {', '.join(labels)}.")
         self.settings.setdefault(stage, {}).update({key: str(value) for key, value in values.items()})
         if stage == "global" and {"source", "section_start", "section_end"} & set(values):
             self.log.append(f"Loading source material: {values.get('source')}")

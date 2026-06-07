@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +22,10 @@ def http_json(method: str, url: str, payload: dict[str, Any] | None = None, time
         raise RuntimeError(f'HTTP {exc.code} from {url}: {body}') from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f'Could not connect to ComfyUI at {url}: {exc.reason}') from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f'Timed out waiting for ComfyUI at {url}') from exc
+    except socket.timeout as exc:
+        raise RuntimeError(f'Timed out waiting for ComfyUI at {url}') from exc
 
 
 def queue_prompt(comfy_url: str, prompt: dict[str, Any], client_id: str | None = None) -> str:
@@ -79,9 +84,24 @@ def ensure_node_types(comfy_url: str, required: dict[str, str], context: str = "
     )
 
 
-def wait_for_prompt(comfy_url: str, prompt_id: str, poll_seconds: float) -> dict[str, Any]:
+def wait_for_prompt(comfy_url: str, prompt_id: str, poll_seconds: float, transient_timeout_seconds: float = 900.0) -> dict[str, Any]:
+    transient_deadline = time.monotonic() + transient_timeout_seconds
+    last_transient_error = ""
     while True:
-        history = http_json('GET', f"{comfy_url.rstrip('/')}/history/{prompt_id}", timeout=30)
+        try:
+            history = http_json('GET', f"{comfy_url.rstrip('/')}/history/{prompt_id}", timeout=30)
+            transient_deadline = time.monotonic() + transient_timeout_seconds
+            last_transient_error = ""
+        except RuntimeError as exc:
+            last_transient_error = str(exc)
+            if time.monotonic() >= transient_deadline:
+                raise RuntimeError(
+                    f"Timed out polling ComfyUI prompt {prompt_id} after transient connection errors. "
+                    f"Last error: {last_transient_error}"
+                ) from exc
+            print(f"Waiting for ComfyUI prompt {prompt_id}; polling temporarily failed: {last_transient_error}", flush=True)
+            time.sleep(max(poll_seconds, 5.0))
+            continue
         entry = history.get(prompt_id)
         if entry:
             status = entry.get('status', {})

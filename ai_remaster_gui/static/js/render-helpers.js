@@ -375,6 +375,7 @@ function logHtml(text) {
 
 function logClass(line) {
   const lower = String(line).toLowerCase();
+  if (lower.includes('polling temporarily failed')) return 'log-warn';
   if (/traceback|runtimeerror|exception|error|failed|refused|exit code [1-9]|filenotfound|permissionerror/.test(lower)) return 'log-error';
   if (/warning|skipping|timed out/.test(lower)) return 'log-warn';
   if (/ready|reuse|wrote|finished with exit code 0|started/.test(lower)) return 'log-ok';

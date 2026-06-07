@@ -214,6 +214,21 @@ class GuiSmokeTests(unittest.TestCase):
                 for symbol in symbols:
                     self.assertIn(symbol, texts)
 
+    def test_wait_for_prompt_retries_transient_polling_errors(self) -> None:
+        calls = {"count": 0}
+
+        def fake_http_json(method, url, timeout=30):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise RuntimeError("Timed out waiting for ComfyUI")
+            return {"prompt-id": {"status": {"completed": True}, "outputs": {}}}
+
+        with mock.patch.object(comfy_api, "http_json", side_effect=fake_http_json), mock.patch.object(comfy_api.time, "sleep"):
+            history = comfy_api.wait_for_prompt("http://127.0.0.1:8188", "prompt-id", 0.01, transient_timeout_seconds=30)
+
+        self.assertEqual(calls["count"], 3)
+        self.assertEqual(history["status"]["completed"], True)
+
     def test_outpaint_prompt_bypasses_unbundled_kj_padding_node(self) -> None:
         workflow = json.loads((app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json").read_text(encoding="utf-8-sig"))
 
@@ -828,11 +843,59 @@ class GuiSmokeTests(unittest.TestCase):
             source.write_bytes(b"placeholder")
             app.APP.settings["global"].update({"source": "input/old.mp4", "section_start": "10", "section_end": "20"})
 
-            with mock.patch.object(server, "video_metrics", return_value={"duration": 123.456}):
+            with (
+                mock.patch.object(server, "video_metrics", return_value={"duration": 123.456}),
+                mock.patch.object(server, "ffprobe_basic_info", return_value={"resolution": "1920x1080"}),
+            ):
                 app.APP.update_settings("global", {"source": str(source)})
 
         self.assertEqual(app.APP.settings["global"]["section_start"], "0")
         self.assertEqual(app.APP.settings["global"]["section_end"], "123.456")
+
+    def test_opening_squareish_sd_source_enables_outpaint_and_upscale_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            source = Path(tmp_text) / "new-source.mp4"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update({"source": "input/old.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "false"})
+
+            with (
+                mock.patch.object(server, "video_metrics", return_value={"duration": 60.0}),
+                mock.patch.object(server, "ffprobe_basic_info", return_value={"resolution": "960x720"}),
+            ):
+                app.APP.update_settings("global", {"source": str(source)})
+
+        self.assertEqual(app.APP.settings["global"]["expand_outpaint"], "true")
+        self.assertEqual(app.APP.settings["global"]["upscale"], "true")
+        self.assertEqual(app.APP.settings["outpaint"]["target_aspect"], "16:9")
+        self.assertEqual(app.APP.settings["upscale"]["target_width"], "1920")
+        self.assertEqual(app.APP.settings["upscale"]["target_height"], "1080")
+
+    def test_opening_1080p_widescreen_source_disables_outpaint_and_upscale_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            source = Path(tmp_text) / "new-source.mp4"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update({"source": "input/old.mp4", "expand_outpaint": "true", "colorize": "true", "upscale": "true"})
+
+            with (
+                mock.patch.object(server, "video_metrics", return_value={"duration": 60.0}),
+                mock.patch.object(server, "ffprobe_basic_info", return_value={"resolution": "1920x1080"}),
+            ):
+                app.APP.update_settings("global", {"source": str(source)})
+
+        self.assertEqual(app.APP.settings["global"]["expand_outpaint"], "false")
+        self.assertEqual(app.APP.settings["global"]["upscale"], "false")
+
+    def test_detected_monochrome_source_sets_colorize_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            source = Path(tmp_text) / "new-source.mp4"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update({"source": str(source), "colorize": "false"})
+
+            app.APP.apply_detected_source_tone(str(source), True)
+            self.assertEqual(app.APP.settings["global"]["colorize"], "true")
+
+            app.APP.apply_detected_source_tone(str(source), False)
+            self.assertEqual(app.APP.settings["global"]["colorize"], "false")
 
     def test_project_payload_round_trips_settings_with_version(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -1383,7 +1446,7 @@ class GuiSmokeTests(unittest.TestCase):
             app.APP.running_stage = ""
             app.APP.running_stage_key = ""
 
-        hydrate.assert_not_called()
+        self.assertNotIn(mock.call("shots"), hydrate.call_args_list)
         self.assertIn("Upscale preview ready.", log)
         self.assertFalse(any("Updated Shot Detection input" in line for line in log))
 

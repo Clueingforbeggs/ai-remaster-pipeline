@@ -299,6 +299,7 @@ function notifyNewLogErrors() {
 
 function isLogErrorLine(line) {
   const lower = String(line || '').toLowerCase();
+  if (lower.includes('polling temporarily failed')) return false;
   return /traceback|runtimeerror|exception|error|failed|refused|exit code [1-9]|filenotfound|permissionerror/.test(lower);
 }
 
