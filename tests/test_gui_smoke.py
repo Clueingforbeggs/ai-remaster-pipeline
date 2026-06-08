@@ -897,6 +897,8 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(app.APP.settings["global"]["expand_outpaint"], "true")
         self.assertEqual(app.APP.settings["global"]["upscale"], "true")
         self.assertEqual(app.APP.settings["outpaint"]["target_aspect"], "16:9")
+        self.assertEqual(app.APP.settings["outpaint"]["target_height"], "source")
+        self.assertEqual(app.APP.settings["outpaint"]["seed_qwen_guides"], "false")
         self.assertEqual(app.APP.settings["upscale"]["target_width"], "1920")
         self.assertEqual(app.APP.settings["upscale"]["target_height"], "1080")
 
@@ -914,6 +916,17 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(app.APP.settings["global"]["expand_outpaint"], "false")
         self.assertEqual(app.APP.settings["global"]["upscale"], "false")
+        self.assertEqual(app.APP.settings["outpaint"]["target_height"], "720")
+        self.assertEqual(app.APP.settings["outpaint"]["seed_qwen_guides"], "false")
+
+    def test_load_settings_never_persists_qwen_seed_guides_as_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            settings_file = Path(tmp_text) / "settings.json"
+            settings_file.write_text(json.dumps({"outpaint": {"seed_qwen_guides": "true"}}), encoding="utf-8")
+            with mock.patch.object(app, "SETTINGS_FILE", settings_file), mock.patch.object(app, "newest", return_value=None):
+                settings = app.load_settings()
+
+        self.assertEqual(settings["outpaint"]["seed_qwen_guides"], "false")
 
     def test_detected_monochrome_source_sets_colorize_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -1143,13 +1156,19 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(reverted["color_reference"], app.rel(color))
         self.assertEqual(after_revert["color_reference_previous"], app.rel(edit))
 
-    def test_guide_edit_preview_command_selects_masked_and_unmasked_runners(self) -> None:
+    def test_guide_edit_preview_command_always_uses_masked_runner(self) -> None:
+        from PIL import Image
+
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
             folder = Path(tmp_text)
             manifest = folder / "chunks.csv"
             guide = folder / "guide.png"
+            prepared = folder / "prepared.mp4"
+            prepared_preview = folder / "prepared_preview.png"
             masked_workflow = folder / "masked.json"
-            guide.write_bytes(b"guide")
+            Image.new("RGB", (16, 9), (32, 32, 32)).save(guide)
+            Image.new("RGB", (16, 9), (0, 0, 0)).save(prepared_preview)
+            prepared.write_bytes(b"prepared")
             masked_workflow.write_text("{}", encoding="utf-8")
             rows = [
                 {
@@ -1169,14 +1188,20 @@ class GuiSmokeTests(unittest.TestCase):
                 }
             )
             fake_state = {"manifest": app.rel(manifest), "rows": [{"index": 0}]}
-            with mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value=fake_state):
+            with (
+                mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value=fake_state),
+                mock.patch.object(outpaint_guides, "ensure_outpaint_prepared_canvas", return_value=prepared),
+                mock.patch.object(outpaint_guides, "chunk_frame_preview", return_value=app.rel(prepared_preview)),
+            ):
                 unmasked, unmasked_output = app.guide_edit_preview_command(0, 0, "replace detail")
                 defaulted, _defaulted_output = app.guide_edit_preview_command(0, 0, "")
                 masked, masked_output = app.guide_edit_preview_command(0, 0, "replace detail", "iVBORw0KGgo=")
 
-        self.assertIn("generate_single_reference.py", " ".join(unmasked))
+        self.assertIn("edit_reference_image.py", " ".join(unmasked))
         self.assertIn("edit_reference_image.py", " ".join(masked))
-        self.assertEqual(defaulted[defaulted.index("--prompt") + 1], "Replace the black bars.")
+        self.assertEqual(Path(unmasked[unmasked.index("--source-image") + 1]), app.resolve(app.rel(guide)))
+        self.assertEqual(defaulted[defaulted.index("--instruction") + 1], "Replace the black bars.")
+        self.assertIn("--mask", unmasked)
         self.assertIn("--mask", masked)
         self.assertIn("outpaint_guides", unmasked_output)
         self.assertIn("outpaint_guides", masked_output)
@@ -1187,8 +1212,12 @@ class GuiSmokeTests(unittest.TestCase):
             manifest = folder / "chunks.csv"
             prepared = folder / "prepared.mp4"
             source_frame = folder / "source.jpg"
+            masked_workflow = folder / "masked.json"
             prepared.write_bytes(b"prepared")
-            source_frame.write_bytes(b"source")
+            from PIL import Image
+
+            Image.new("RGB", (16, 9), (0, 0, 0)).save(source_frame)
+            masked_workflow.write_text("{}", encoding="utf-8")
             rows = [
                 {
                     "chunk_index": "0",
@@ -1199,7 +1228,7 @@ class GuiSmokeTests(unittest.TestCase):
                 }
             ]
             app.write_outpaint_chunk_rows(manifest, rows)
-            app.APP.settings["references"].update({"workflow": "workflows/qwen_image_edit/Image Edit (Qwen 2511).json"})
+            app.APP.settings["references"].update({"masked_workflow": app.rel(masked_workflow)})
             fake_state = {"manifest": app.rel(manifest), "rows": [{"index": 0, "fps": 24, "start": 0.0, "end": 1.0}]}
 
             with (
@@ -1210,7 +1239,9 @@ class GuiSmokeTests(unittest.TestCase):
             ):
                 command, _output, _canvas, _seconds = app.outpaint_guide_generation_command(0, "")
 
-        self.assertEqual(command[command.index("--prompt") + 1], "Replace the black bars.")
+        self.assertIn("edit_reference_image.py", " ".join(command))
+        self.assertEqual(command[command.index("--instruction") + 1], "Replace the black bars.")
+        self.assertIn("--mask", command)
 
     def test_masked_edit_uses_bundled_workflow_when_setting_is_empty(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
@@ -1858,6 +1889,8 @@ class GuiSmokeTests(unittest.TestCase):
             settings = app.load_settings()
 
         self.assertEqual(settings["global"]["expand_outpaint"], "true")
+        self.assertEqual(settings["outpaint"]["target_height"], "source")
+        self.assertEqual(settings["outpaint"]["seed_qwen_guides"], "false")
 
     def test_blank_loaded_project_defaults_outpainting_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

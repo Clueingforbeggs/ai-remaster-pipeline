@@ -844,6 +844,7 @@ def apply_qwen_seed_guides(args, prepared: Path, ranges: list[tuple[int, int, in
     comfy_output_root = resolve_path(args.comfy_output_root) if args.comfy_output_root else resolve_path(args.comfy_dir) / "output"
     qwen_args = {
         "workflow": args.qwen_workflow,
+        "masked_workflow": args.qwen_masked_workflow,
         "comfy_url": args.comfy_url,
         "comfy_dir": str(resolve_path(args.comfy_dir)),
         "comfy_output_root": str(comfy_output_root),
@@ -1097,6 +1098,7 @@ def build_parser() -> argparse.ArgumentParser:
     # shot change with Qwen Image Edit so each shot anchors from a frame whose bars are filled.
     parser.add_argument("--seed-qwen-guides", action="store_true", help="Before rendering, detect shot changes and auto-add a Qwen-outpainted guide frame at each one.")
     parser.add_argument("--qwen-workflow", default=str(ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2511).json"))
+    parser.add_argument("--qwen-masked-workflow", default=str(ROOT / "workflows" / "qwen_image_edit" / "Image Edit Inpaint (Qwen 2511).json"))
     parser.add_argument("--qwen-model-backend", default="gguf")
     parser.add_argument("--qwen-gguf-model", default=QWEN_IMAGE_EDIT_MODEL)
     parser.add_argument("--qwen-prompt", default=DEFAULT_SEED_PROMPT, help="Prompt sent to Qwen Image Edit for each seed guide frame.")

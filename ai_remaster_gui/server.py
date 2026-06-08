@@ -126,6 +126,7 @@ from .outpaint_guides import (
     clear_guide_frame_image,
     guide_edit_preview_command,
     guide_frame_generation_command,
+    normalize_guide_preview_to_source,
     remove_guide_frame,
     outpaint_end_guide_generation_command,
     outpaint_guide_generation_command,
@@ -234,11 +235,10 @@ def source_workflow_defaults(info: dict[str, str], monochrome: bool | None = Non
         global_defaults["upscale"] = "true" if needs_upscale else "false"
         if squareish:
             stage_defaults.setdefault("outpaint", {})["target_aspect"] = "16:9"
-        # Outpaint at the source's native height when it is smaller than the 720 dropdown
-        # default, so a low-res source (e.g. 480p) is not silently upscaled during the
-        # (expensive) outpaint pass. The dedicated Upscale phase handles resolution increases.
-        if height < 720:
-            stage_defaults.setdefault("outpaint", {})["target_height"] = "source"
+        # Keep outpainting at native height for 720p-and-under sources. Larger sources
+        # default to the established 720p/704p model-safe path.
+        stage_defaults.setdefault("outpaint", {})["target_height"] = "source" if height <= 720 else "720"
+        stage_defaults.setdefault("outpaint", {})["seed_qwen_guides"] = "false"
         if needs_upscale:
             stage_defaults.setdefault("upscale", {}).update({"target_width": "1920", "target_height": "1080"})
     # Default the soundtrack phase on only when the source has no audio track (a silent film).
@@ -938,9 +938,12 @@ class PipelineApp:
                 ref = self.settings.get("references", {})
                 comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
                 qwen_workflow = qwen_workflow_for(ref, config) or ref.get("workflow", "")
+                qwen_masked_workflow = qwen_masked_workflow_for(ref, config) or ref.get("masked_workflow", "")
                 add(["--seed-qwen-guides"])
                 if qwen_workflow:
                     add(["--qwen-workflow", qwen_workflow])
+                if qwen_masked_workflow:
+                    add(["--qwen-masked-workflow", qwen_masked_workflow])
                 add(["--qwen-model-backend", ref.get("model_backend", "gguf")])
                 add(["--qwen-gguf-model", ref.get("gguf_model", QWEN_IMAGE_EDIT_MODEL)])
                 add(["--qwen-prompt", DEFAULT_ANCHOR_PROMPT])
@@ -1518,8 +1521,38 @@ class PipelineApp:
                 self.run_started_at = 0.0
                 self.log.append(f"Could not start guide edit preview: {exc}")
                 return False, f"Could not start guide edit preview: {exc}", output
-            threading.Thread(target=self._collect_output, args=("outpaint",), daemon=True).start()
+            source = Path("")
+            try:
+                sidecar = resolve(output).with_suffix(resolve(output).suffix + ".json")
+                source_text = json.loads(sidecar.read_text(encoding="utf-8")).get("source_image", "")
+                source = resolve(source_text) if source_text else Path("")
+            except Exception:
+                source = Path("")
+            threading.Thread(target=self._collect_output_guide_edit, args=(resolve(output), source), daemon=True).start()
         return True, f"Started guide edit preview for chunk {chunk_index + 1}, guide {guide_index + 1}.", output
+
+    def _collect_output_guide_edit(self, output: Path, source: Path) -> None:
+        """Collect a guide edit preview and normalize the Qwen result to the editor image size."""
+        assert self.process and self.process.stdout
+        for line in self.process.stdout:
+            with self.lock:
+                self.log.append(line.rstrip())
+        code = self.process.wait()
+        with self.lock:
+            self.log.append(f"Process finished with exit code {code}.")
+            self.running_stage = ""
+            self.running_stage_key = ""
+            self.running_reference_manifest = ""
+            self.running_reference_index = None
+            self.run_started_at = 0.0
+            if code == 0 and output.exists() and source.exists():
+                try:
+                    normalize_guide_preview_to_source(output, source)
+                    self.log.append("Guide edit preview resized to the editor image size.")
+                except Exception as exc:
+                    self.log.append(f"Warning: guide edit preview resize failed (preview used as-is): {exc}")
+            if code == 0:
+                self.hydrate_stage_inputs("outpaint")
 
     def _collect_output_guide(self, output: Path, prepared_canvas: Path, source_seconds: float | None = None) -> None:
         """Like _collect_output but composites the guide in-place after a successful Qwen run."""

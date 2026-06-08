@@ -140,6 +140,7 @@ def load_settings() -> dict[str, dict[str, str]]:
     }
     if defaults["outpaint"].get("prompt", "").strip() != OUTPAINT_PROMPT or defaults["outpaint"].get("prompt", "") in old_outpaint_prompts:
         defaults["outpaint"]["prompt"] = OUTPAINT_PROMPT
+    defaults["outpaint"]["seed_qwen_guides"] = "false"
     defaults["colour"].setdefault("method", "deepexemplar")
     defaults["recomp"].setdefault("colorization_method", "deepexemplar")
     bundled_output = rel(ROOT / "tools" / "comfyui" / "output")

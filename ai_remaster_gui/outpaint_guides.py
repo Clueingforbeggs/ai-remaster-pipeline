@@ -13,6 +13,10 @@ from .media import extract_video_frame_at
 from .paths import rel, resolve, resolve_video_source
 from .sam_masks import sam2_mask_for_image
 
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+from guide_frame_utils import guide_output_size_for_prepared, save_edge_mask_for_image  # noqa: E402
+
 
 def bind_context(context: dict) -> None:
     globals().update(context)
@@ -145,39 +149,16 @@ def guide_frame_generation_command(chunk_index: int, guide_index: int, frame_idx
         stored[chunk_index]["guide_frames"] = json.dumps(frames)
         write_outpaint_chunk_rows(manifest, [stored[k] for k in sorted(stored)])
 
-    values = APP.settings.get("references", {})
-    config = current_config()
-    workflow = qwen_workflow_for(values, config)
-    if not workflow:
-        raise RuntimeError("No Qwen Image Edit workflow found. Install/configure ComfyUI first.")
     guide_prompt = prompt.strip() or DEFAULT_ANCHOR_PROMPT
-    cmd = [
-        sys.executable, "-u",
-        str(SCRIPTS / "generate_single_reference.py"),
-        "--source-image", str(source_img),
-        "--output", str(output),
-        "--workflow", workflow,
-        "--comfy-url", values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188"),
-        "--comfy-dir", config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
-        "--comfy-output-root", values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
-        "--model-backend", values.get("model_backend", "gguf"),
-        "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
-        "--prompt", guide_prompt,
-        "--prompt-suffix", "",
-        "--load-image-node-id", values.get("load_image_node_id", "auto"),
-        "--save-node-id", values.get("save_node_id", "auto"),
-        "--no-normalize-to-source-size",
-        "--force",
-    ]
-    if values.get("prompt_node_id"):
-        cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    mask = save_edge_mask_for_image(source_img, output.with_name(f"chunk_{chunk_index:04d}_guide_{guide_index:02d}_qwen_edge_mask.png"))
+    cmd = auto_masked_guide_command(source_img, output, guide_prompt, mask)
     return cmd, rel(output), resolve(range_source), source_seconds
 
 def _composite_guide_in_place(output: Path, prepared_canvas: Path, source_seconds: float | None = None) -> None:
     """Composite a Qwen guide PNG with actual source content, then inpaint black corners, in-place.
 
     Steps:
-      1. Scale the Qwen guide to exactly match the LTX canvas size (stretch, not crop).
+      1. Scale the Qwen guide to the LTX work canvas size.
       2. Overlay actual source pixels from the prepared canvas wherever they are non-black
          (i.e. the source content area â€” e.g. 960Ã—704 centred in 1280Ã—704).  This ensures
          pixel-accurate alignment between the guide and the prepared canvas regardless of any
@@ -220,33 +201,13 @@ def _composite_guide_in_place(output: Path, prepared_canvas: Path, source_second
 
     resampling = getattr(PILImage, "Resampling", PILImage).LANCZOS
 
-    # Step 1: scale Qwen output to fit within the canvas, preserving AR.
-    # Use the tighter dimension (min) so the image never exceeds either canvas axis.
-    # For landscape (e.g. 1280Ã—704): Qwen is typically slightly wider in AR, so width is the
-    # tighter constraint and the result is e.g. 1280Ã—691 with spare pixels top/bottom.
-    # For portrait (e.g. 704Ã—1280): height is typically the tighter constraint.
-    # A calibrated 1px-left / 1px-down nudge is applied for pixel-perfect alignment.
-    scale = min(canvas_w / img_w, canvas_h / img_h)
-    new_w = max(1, int(round(img_w * scale)))
-    new_h = max(1, int(round(img_h * scale)))
-    resized = guide_rgb.resize((new_w, new_h), resampling)
+    guide_w, guide_h = guide_output_size_for_prepared(prepared_canvas, canvas_w, canvas_h)
+    if src_frame.shape[1] != guide_w or src_frame.shape[0] != guide_h:
+        src_frame = cv2.resize(src_frame, (guide_w, guide_h), interpolation=cv2.INTER_LANCZOS4)
 
-    nominal_x = (canvas_w - new_w) // 2
-    nominal_y = (canvas_h - new_h) // 2
-    paste_x = nominal_x - 1   # 1 px left
-    paste_y = nominal_y + 1   # 1 px down
-
-    canvas_pil = PILImage.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
-    # Clip to canvas bounds, cropping the source image if the offset is negative.
-    src_x0 = max(0, -paste_x)
-    src_y0 = max(0, -paste_y)
-    dst_x0 = max(0, paste_x)
-    dst_y0 = max(0, paste_y)
-    blit_w = min(new_w - src_x0, canvas_w - dst_x0)
-    blit_h = min(new_h - src_y0, canvas_h - dst_y0)
-    if blit_w > 0 and blit_h > 0:
-        region = resized.crop((src_x0, src_y0, src_x0 + blit_w, src_y0 + blit_h))
-        canvas_pil.paste(region, (dst_x0, dst_y0))
+    # Step 1: fill-resize Qwen output to the model-safe guide canvas. Do not preserve
+    # Qwen's AR here; the prepared video geometry is the authority.
+    canvas_pil = guide_rgb.resize((guide_w, guide_h), resampling)
 
     canvas_bgr = cv2.cvtColor(np.array(canvas_pil), cv2.COLOR_RGB2BGR)
 
@@ -285,6 +246,36 @@ def save_qwen_input_copy(source: Path, target: Path) -> Path:
     shutil.copy2(source, target)
     return target
 
+def auto_masked_guide_command(source: Path, output: Path, prompt: str, mask: Path) -> list[str]:
+    values = APP.settings.get("references", {})
+    config = current_config()
+    workflow = qwen_masked_workflow_for(values, config)
+    if not workflow:
+        raise RuntimeError("Automatic guide generation needs a Qwen masked edit workflow.")
+    if not resolve(workflow).is_file():
+        raise FileNotFoundError(f"Masked edit workflow not found: {workflow}")
+    cmd = [
+        sys.executable, "-u",
+        str(SCRIPTS / "edit_reference_image.py"),
+        "--source-image", str(source),
+        "--mask", rel(mask),
+        "--output", rel(output),
+        "--workflow", workflow,
+        "--comfy-url", values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188"),
+        "--comfy-dir", config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
+        "--comfy-output-root", values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
+        "--model-backend", values.get("model_backend", "gguf"),
+        "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
+        "--instruction", prompt,
+        "--load-image-node-id", values.get("load_image_node_id", "auto"),
+        "--save-node-id", values.get("save_node_id", "auto"),
+        "--no-normalize-to-source-size",
+        "--force",
+    ]
+    if values.get("prompt_node_id"):
+        cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    return cmd
+
 def outpaint_guide_generation_command(index: int, prompt: str) -> tuple[list[str], str, Path]:
     state = outpaint_chunks_state(APP.settings)
     rows = state.get("rows", [])
@@ -320,45 +311,9 @@ def outpaint_guide_generation_command(index: int, prompt: str) -> tuple[list[str
     stored[index]["guide_image"] = rel(output)
     write_outpaint_chunk_rows(manifest, [stored[key] for key in sorted(stored)])
 
-    values = APP.settings.get("references", {})
-    config = current_config()
-    workflow = qwen_workflow_for(values, config)
-    if not workflow:
-        raise RuntimeError("No Qwen Image Edit workflow found. Install/configure ComfyUI first.")
     guide_prompt = prompt.strip() or DEFAULT_ANCHOR_PROMPT
-    cmd = [
-        sys.executable,
-        "-u",
-        str(SCRIPTS / "generate_single_reference.py"),
-        "--source-image",
-        str(source),
-        "--output",
-        str(output),
-        "--workflow",
-        workflow,
-        "--comfy-url",
-        values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188"),
-        "--comfy-dir",
-        config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
-        "--comfy-output-root",
-        values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
-        "--model-backend",
-        values.get("model_backend", "gguf"),
-        "--gguf-model",
-        values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
-        "--prompt",
-        guide_prompt,
-        "--prompt-suffix",
-        "",
-        "--load-image-node-id",
-        values.get("load_image_node_id", "auto"),
-        "--save-node-id",
-        values.get("save_node_id", "auto"),
-        "--no-normalize-to-source-size",
-        "--force",
-    ]
-    if values.get("prompt_node_id"):
-        cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    mask = save_edge_mask_for_image(source, output.with_name(f"chunk_{index:04d}_guide_qwen_edge_mask.png"))
+    cmd = auto_masked_guide_command(source, output, guide_prompt, mask)
     return cmd, rel(output), resolve(range_source), guide_source_seconds
 
 def outpaint_end_guide_generation_command(index: int, prompt: str) -> tuple[list[str], str, Path, float]:
@@ -397,45 +352,9 @@ def outpaint_end_guide_generation_command(index: int, prompt: str) -> tuple[list
     stored[index]["guide_end_image"] = rel(output)
     write_outpaint_chunk_rows(manifest, [stored[key] for key in sorted(stored)])
 
-    values = APP.settings.get("references", {})
-    config = current_config()
-    workflow = qwen_workflow_for(values, config)
-    if not workflow:
-        raise RuntimeError("No Qwen Image Edit workflow found. Install/configure ComfyUI first.")
     guide_prompt = prompt.strip() or DEFAULT_ANCHOR_PROMPT
-    cmd = [
-        sys.executable,
-        "-u",
-        str(SCRIPTS / "generate_single_reference.py"),
-        "--source-image",
-        str(source),
-        "--output",
-        str(output),
-        "--workflow",
-        workflow,
-        "--comfy-url",
-        values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188"),
-        "--comfy-dir",
-        config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
-        "--comfy-output-root",
-        values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
-        "--model-backend",
-        values.get("model_backend", "gguf"),
-        "--gguf-model",
-        values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
-        "--prompt",
-        guide_prompt,
-        "--prompt-suffix",
-        "",
-        "--load-image-node-id",
-        values.get("load_image_node_id", "auto"),
-        "--save-node-id",
-        values.get("save_node_id", "auto"),
-        "--no-normalize-to-source-size",
-        "--force",
-    ]
-    if values.get("prompt_node_id"):
-        cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    mask = save_edge_mask_for_image(source, output.with_name(f"chunk_{index:04d}_guide_end_qwen_edge_mask.png"))
+    cmd = auto_masked_guide_command(source, output, guide_prompt, mask)
     return cmd, rel(output), resolve(range_source), guide_source_seconds
 
 
@@ -559,6 +478,23 @@ def _guide_edit_prompt(instruction: str, sampled_color: str = "") -> str:
         parts.append(f"Use the sampled colour/value exactly where relevant: {sampled_color.strip()}.")
     return " ".join(part for part in parts if part).strip() or DEFAULT_ANCHOR_PROMPT
 
+def normalize_guide_preview_to_source(output: Path, source: Path) -> None:
+    """Fill-resize a Qwen guide-edit preview to the editor source image size."""
+    if not output.is_file() or not source.is_file():
+        return
+    from PIL import Image as PILImage
+
+    raw_copy = output.with_name(output.stem + "_raw" + output.suffix)
+    if not raw_copy.exists():
+        shutil.copy2(output, raw_copy)
+    with PILImage.open(source) as src_img:
+        target_size = src_img.size
+    with PILImage.open(output) as out_img:
+        if out_img.size == target_size:
+            return
+        resampling = getattr(PILImage, "Resampling", PILImage).LANCZOS
+        out_img.convert("RGB").resize(target_size, resampling).save(output, format="PNG")
+
 def _guide_editor_source(chunk_index: int, guide_index: int, frames: list[dict]) -> tuple[str, Path | None, float | None]:
     current = frames[guide_index].get("image", "")
     if current and resolve(current).is_file():
@@ -590,54 +526,37 @@ def guide_edit_preview_command(chunk_index: int, guide_index: int, instruction: 
     source = resolve(source_rel)
     output = _next_guide_edit_output(manifest, chunk_index, guide_index)
     mask = _save_guide_edit_mask(manifest, chunk_index, guide_index, mask_data)
+    if not mask:
+        mask_path = _guide_edit_dir(manifest, chunk_index, guide_index) / f"mask_edge_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        mask = rel(save_edge_mask_for_image(source, mask_path))
     prompt = _guide_edit_prompt(instruction, sampled_color)
     values = APP.settings.get("references", {})
     config = current_config()
     comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
     comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
     comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
-    if mask:
-        workflow = qwen_masked_workflow_for(values, config)
-        if not workflow:
-            raise RuntimeError("Masked guide editing needs a Qwen masked edit workflow. ARP's bundled masked workflow was not found, and no custom workflow is set.")
-        if not resolve(workflow).is_file():
-            raise FileNotFoundError(f"Masked edit workflow not found: {workflow}")
-        cmd = [
-            sys.executable, "-u", str(SCRIPTS / "edit_reference_image.py"),
-            "--source-image", str(source),
-            "--mask", mask,
-            "--output", rel(output),
-            "--workflow", workflow,
-            "--comfy-url", comfy_url,
-            "--comfy-dir", comfy_dir,
-            "--comfy-output-root", comfy_output,
-            "--model-backend", values.get("model_backend", "gguf"),
-            "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
-            "--instruction", prompt,
-            "--no-normalize-to-source-size",
-            "--force",
-        ]
-    else:
-        workflow = qwen_workflow_for(values, config)
-        cmd = [
-            sys.executable, "-u", str(SCRIPTS / "generate_single_reference.py"),
-            "--source-image", str(source),
-            "--output", rel(output),
-            "--workflow", workflow,
-            "--comfy-url", comfy_url,
-            "--comfy-dir", comfy_dir,
-            "--comfy-output-root", comfy_output,
-            "--model-backend", values.get("model_backend", "gguf"),
-            "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
-            "--prompt", prompt,
-            "--prompt-suffix", "",
-            "--load-image-node-id", values.get("load_image_node_id", "auto"),
-            "--save-node-id", values.get("save_node_id", "auto"),
-            "--no-normalize-to-source-size",
-            "--force",
-        ]
-        if values.get("prompt_node_id"):
-            cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
+    workflow = qwen_masked_workflow_for(values, config)
+    if not workflow:
+        raise RuntimeError("Guide editing needs a Qwen masked edit workflow. ARP's bundled masked workflow was not found, and no custom workflow is set.")
+    if not resolve(workflow).is_file():
+        raise FileNotFoundError(f"Masked edit workflow not found: {workflow}")
+    cmd = [
+        sys.executable, "-u", str(SCRIPTS / "edit_reference_image.py"),
+        "--source-image", str(source),
+        "--mask", mask,
+        "--output", rel(output),
+        "--workflow", workflow,
+        "--comfy-url", comfy_url,
+        "--comfy-dir", comfy_dir,
+        "--comfy-output-root", comfy_output,
+        "--model-backend", values.get("model_backend", "gguf"),
+        "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
+        "--instruction", prompt,
+        "--no-normalize-to-source-size",
+        "--force",
+    ]
+    if values.get("prompt_node_id"):
+        cmd.extend(["--prompt-node-id", values["prompt_node_id"]])
     output.with_suffix(output.suffix + ".json").write_text(
         json.dumps(
             {

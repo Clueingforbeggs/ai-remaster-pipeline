@@ -14,6 +14,7 @@ chunk's output as their auto-guide, so this only adds anchors where they are act
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ import numpy as np
 
 import generate_references as gr
 from common import ROOT, root_relative
+from guide_frame_utils import resize_frame_for_qwen, save_edge_mask_for_frame
 
 DEFAULT_SEED_PROMPT = "Replace the black bars."
 
@@ -54,7 +56,7 @@ def detect_shot_start_frames(
 def _composite_seed_guide(qwen_png: Path, src_frame: "np.ndarray", out_png: Path) -> None:
     """Composite the Qwen outpaint with the real source centre, then fill any black corners.
 
-    Mirrors the GUI's guide compositing: scale Qwen's output to fit the canvas, overlay the
+    Mirrors the GUI's guide compositing: scale Qwen's output to the canvas, overlay the
     actual (pixel-aligned) source content with a soft inward feather so only the outpainted
     margins come from Qwen, and inpaint any residual black corners.
     """
@@ -65,20 +67,9 @@ def _composite_seed_guide(qwen_png: Path, src_frame: "np.ndarray", out_png: Path
         guide_rgb = img.convert("RGB")
         img_w, img_h = img.size
     resampling = getattr(PILImage, "Resampling", PILImage).LANCZOS
-    scale = min(width / img_w, height / img_h)
-    new_w = max(1, round(img_w * scale))
-    new_h = max(1, round(img_h * scale))
-    resized = guide_rgb.resize((new_w, new_h), resampling)
-
-    canvas = PILImage.new("RGB", (width, height), (0, 0, 0))
-    paste_x = (width - new_w) // 2 - 1
-    paste_y = (height - new_h) // 2 + 1
-    src_x0, src_y0 = max(0, -paste_x), max(0, -paste_y)
-    dst_x0, dst_y0 = max(0, paste_x), max(0, paste_y)
-    blit_w = min(new_w - src_x0, width - dst_x0)
-    blit_h = min(new_h - src_y0, height - dst_y0)
-    if blit_w > 0 and blit_h > 0:
-        canvas.paste(resized.crop((src_x0, src_y0, src_x0 + blit_w, src_y0 + blit_h)), (dst_x0, dst_y0))
+    # Warp to the exact model-safe guide canvas instead of preserving Qwen's nearby
+    # patch-friendly AR. This keeps guide frames pixel-compatible with the prepared video.
+    canvas = guide_rgb.resize((width, height), resampling)
 
     canvas_bgr = cv2.cvtColor(np.array(canvas), cv2.COLOR_RGB2BGR)
     content = np.any(src_frame > 4, axis=2)
@@ -99,27 +90,33 @@ def _composite_seed_guide(qwen_png: Path, src_frame: "np.ndarray", out_png: Path
 def generate_seed_guide(prepared_frame: "np.ndarray", qwen_args: dict, out_guide: Path, force: bool = False) -> Path | None:
     """Run Qwen Image Edit on a single pillarboxed frame and composite a usable guide.
 
-    Caches by output path: if the guide PNG already exists and *force* is False, the expensive
-    Qwen pass is skipped. Returns the guide path, or None if generation failed.
+    Caches the expensive Qwen pass by raw output path. If the raw PNG already exists and
+    *force* is False, rebuild the final guide from it so compositor fixes can refresh old
+    guides without another Qwen render.
     """
-    if out_guide.exists() and not force:
-        return out_guide
     out_guide.parent.mkdir(parents=True, exist_ok=True)
     qwen_in = out_guide.with_name(out_guide.stem + "_qwen_input.png")
+    qwen_mask = out_guide.with_name(out_guide.stem + "_qwen_edge_mask.png")
     qwen_raw = out_guide.with_name(out_guide.stem + "_qwen_raw.png")
+    if out_guide.exists() and qwen_raw.exists() and not force:
+        _composite_seed_guide(qwen_raw, prepared_frame, out_guide)
+        return out_guide
+    if out_guide.exists() and not force:
+        return out_guide
     cv2.imwrite(str(qwen_in), prepared_frame)
+    save_edge_mask_for_frame(prepared_frame, qwen_mask)
     cmd = [
-        sys.executable, "-u", str(ROOT / "scripts" / "generate_single_reference.py"),
+        sys.executable, "-u", str(ROOT / "scripts" / "edit_reference_image.py"),
         "--source-image", str(qwen_in),
+        "--mask", str(qwen_mask),
         "--output", str(qwen_raw),
-        "--workflow", qwen_args["workflow"],
+        "--workflow", qwen_args.get("masked_workflow") or qwen_args["workflow"],
         "--comfy-url", qwen_args["comfy_url"],
         "--comfy-dir", qwen_args["comfy_dir"],
         "--comfy-output-root", qwen_args["comfy_output_root"],
         "--model-backend", qwen_args.get("model_backend", "gguf"),
         "--gguf-model", qwen_args["gguf_model"],
-        "--prompt", qwen_args.get("prompt", DEFAULT_SEED_PROMPT),
-        "--prompt-suffix", "",
+        "--instruction", qwen_args.get("prompt", DEFAULT_SEED_PROMPT),
         "--load-image-node-id", qwen_args.get("load_image_node_id", "auto"),
         "--save-node-id", qwen_args.get("save_node_id", "auto"),
         "--no-normalize-to-source-size",
@@ -169,7 +166,8 @@ def seed_guides(
                     if not ok or frame is None:
                         cache[boundary] = None
                         continue
-                    cache[boundary] = generate_seed_guide(frame, qwen_args, out_dir / f"shot_{boundary:06d}.png", force)
+                    guide_frame = resize_frame_for_qwen(frame, prepared)
+                    cache[boundary] = generate_seed_guide(guide_frame, qwen_args, out_dir / f"shot_{boundary:06d}.png", force)
                 guide_path = cache[boundary]
                 if guide_path is None:
                     continue

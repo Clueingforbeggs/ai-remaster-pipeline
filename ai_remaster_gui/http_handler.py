@@ -145,7 +145,7 @@ class Handler(BaseHTTPRequestHandler):
                     if row is None:
                         self.send_json({"ok": False, "error": "Chunk not found"})
                     else:
-                        range_source = resolve_video_source(source_text)
+                        range_source = ensure_outpaint_prepared_canvas(source_text, APP.settings.get("outpaint", {}))
                         fps = float(row.get("fps", 24) or 24)
                         secs = _guide_source_seconds(row, frame_idx, fps)
                         cache_key = f"gfprev_{chunk_index}_{frame_idx}"

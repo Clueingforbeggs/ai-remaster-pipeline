@@ -147,12 +147,18 @@ function openReferenceEditor(manifest, index) {
   loadReferenceEditorImage(media(row.color_reference) + '&t=' + (row.color_reference_mtime || Date.now()));
 }
 
-function openGuideEditor(chunkIndex, guideIndex, fallbackPath = '') {
+async function openGuideEditor(chunkIndex, guideIndex, fallbackPath = '') {
   const rows = (state.outpaint_chunks && state.outpaint_chunks.rows) || [];
   const row = rows.find(item => Number(item.index) === Number(chunkIndex));
   const guide = row && (row.guides || [])[guideIndex];
   if (!row || !guide) return;
-  const srcPath = guide.image_exists ? guide.image : (guide.source_preview || fallbackPath);
+  let srcPath = guide.image_exists ? guide.image : (guide.source_preview || fallbackPath);
+  if (!srcPath) {
+    const frameIdx = Number(guide.frame_idx || 0);
+    const result = await api(`/api/outpaint-guide-preview?chunk_index=${chunkIndex}&frame_idx=${frameIdx}`);
+    srcPath = (result && result.preview) || guide.image;
+    if (result && result.preview) guide.source_preview = result.preview;
+  }
   if (!srcPath) return alert('Guide preview is still loading.');
   referenceEditor.mode = 'guide';
   referenceEditor.manifest = '';
@@ -300,13 +306,15 @@ function loadReferenceEditorImage(src) {
 }
 
 function wireReferenceEditorCanvas() {
-  const canvas = document.getElementById('referenceMaskCanvas');
-  canvas.addEventListener('pointerdown', event => {
+  const wrap = document.querySelector('.reference-canvas-wrap');
+  wrap.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
     referenceEditor.drawing = true;
     handleReferenceCanvasPoint(event);
   });
-  canvas.addEventListener('pointermove', event => {
+  wrap.addEventListener('pointermove', event => {
     if (!referenceEditor.drawing) return;
+    if ((event.buttons & 1) === 0) return;
     if (!referenceEditor.tool.startsWith('brush')) return;
     handleReferenceCanvasPoint(event);
   });
