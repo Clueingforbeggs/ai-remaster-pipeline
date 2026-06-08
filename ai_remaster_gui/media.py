@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,26 @@ from .project_io import source_analysis_key, source_signature
 
 SOURCE_PREVIEW_COUNT = 3
 ASPECT_PREVIEW_STYLE_VERSION = 4
+
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import artifact_ids as aid  # noqa: E402
+
+
+def aspect_preview_identity(source: Path, size: int, mtime_ns: int, aspect: str, crops: tuple[int, int, int, int], seconds: float, offset_x: int = 0, offset_y: int = 0) -> dict:
+    return {
+        "v": 1,
+        "kind": "aspect_preview",
+        "source": aid.safe_stem(source.name),
+        "source_path": str(source.resolve()),
+        "source_size": int(size),
+        "source_mtime_ns": int(mtime_ns),
+        "aspect": str(aspect),
+        "crop": [int(v) for v in crops],
+        "seconds_ms": int(round(seconds * 1000)),
+        "offset": [int(offset_x), int(offset_y)],
+        "style": ASPECT_PREVIEW_STYLE_VERSION,
+    }
 
 
 def bind_context(context: dict) -> None:
@@ -225,21 +246,25 @@ def section_relative_seconds(settings: dict, seconds: float) -> float:
     end = section_float(settings.get("global", {}).get("section_end", ""), 0.0)
     return max(0.0, min(end - start, seconds - start))
 
-def aspect_preview_cached(source_path: str, _size: int, mtime_ns: int, aspect: str, crops: tuple[int, int, int, int], seconds: float, offset_x: int = 0, offset_y: int = 0) -> str:
+def aspect_preview_cached(source_path: str, size: int, mtime_ns: int, aspect: str, crops: tuple[int, int, int, int], seconds: float, offset_x: int = 0, offset_y: int = 0) -> str:
     source = Path(source_path)
     source_frame = extract_video_frame_at(source, ASPECT_PREVIEW_DIR / "frames", f"aspect_{int(seconds * 1000):010d}", seconds)
     if not source_frame:
         return ""
-    crop_slug = "" if not any(crops) else "_crop" + "-".join(str(v) for v in crops)
-    offset_slug = "" if not (offset_x or offset_y) else f"_ox{int(offset_x):+d}_oy{int(offset_y):+d}"
-    target = ASPECT_PREVIEW_DIR / f"{safe_preview_name(source)}_{aspect_slug(aspect)}{crop_slug}{offset_slug}_{int(seconds * 1000):010d}_v{ASPECT_PREVIEW_STYLE_VERSION}.jpg"
+    identity = aspect_preview_identity(source, size, mtime_ns, aspect, crops, seconds, offset_x, offset_y)
+    target = aid.artifact_path(ASPECT_PREVIEW_DIR, aid.source_word(source.name), "aspectpreview", identity, "jpg")
     if target.exists() and target.stat().st_mtime_ns >= mtime_ns:
+        if not aid.sig_path(target).exists():
+            aid.write_identity(target, identity, label="Aspect preview")
         return rel(target)
     try:
         from PIL import Image, ImageOps
     except ModuleNotFoundError:
         APP.log.append("Pillow is not available; using FFmpeg for the aspect preview.")
-        return ffmpeg_aspect_preview(source, target, aspect, mtime_ns, offset_x, offset_y) or source_frame
+        preview = ffmpeg_aspect_preview(source, target, aspect, mtime_ns, offset_x, offset_y)
+        if preview:
+            aid.write_identity(target, identity, label="Aspect preview")
+        return preview or source_frame
     ratio = parse_aspect(aspect)
     image = Image.open(resolve(source_frame)).convert("RGB")
     width, height = image.size
@@ -260,6 +285,7 @@ def aspect_preview_cached(source_path: str, _size: int, mtime_ns: int, aspect: s
     preview = ImageOps.contain(canvas, (960, 540), Image.Resampling.LANCZOS)
     target.parent.mkdir(parents=True, exist_ok=True)
     preview.save(target, quality=90)
+    aid.write_identity(target, identity, label="Aspect preview")
     return rel(target)
 
 def draw_source_frame_border(canvas, origin: tuple[int, int], size: tuple[int, int]) -> None:

@@ -1894,12 +1894,41 @@ class GuiSmokeTests(unittest.TestCase):
     def test_preview_cache_name_uses_short_stem_and_hash(self) -> None:
         source = Path(r"C:\Users\mdamberger\AppData\Local\Programs\ai-remaster-pipeline\intermediate\source_sections\DrWho_Wheel_in_space_0000000000_0000154040.mp4")
 
-        name = app.safe_preview_name(source)
-        preview = Path(r"C:\Users\mdamberger\AppData\Local\Programs\ai-remaster-pipeline\.cache\aspect_previews") / f"{name}_16x9_crop8-7-0-0_0000000000_v4.jpg"
+        identity = app.aspect_preview_identity(source, 123, 456, "16:9", (8, 7, 0, 0), 0.0)
+        preview = Path(r"C:\Users\mdamberger\AppData\Local\Programs\ai-remaster-pipeline\.cache\aspect_previews") / app.aid.artifact_name(
+            app.aid.source_word(source.name),
+            "aspectpreview",
+            identity,
+            "jpg",
+        )
 
-        self.assertTrue(name.startswith("DrWho_Wheel_in_space_0000000000_0000154040_"))
-        self.assertNotIn("AppData_Local_Programs", name)
+        self.assertTrue(preview.name.startswith("DrWho_aspectpreview_"))
+        self.assertNotIn("16x9", preview.name)
+        self.assertNotIn("crop", preview.name)
         self.assertLess(len(str(preview)), 240)
+
+    def test_aspect_preview_cache_writes_signature_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "source.mp4"
+            source.write_bytes(b"video placeholder")
+            preview_dir = folder / "aspect_previews"
+            identity = app.aspect_preview_identity(source, source.stat().st_size, source.stat().st_mtime_ns, "16:9", (8, 7, 0, 0), 0.0)
+            target = preview_dir / app.aid.artifact_name(app.aid.source_word(source.name), "aspectpreview", identity, "jpg")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"preview")
+
+            with mock.patch.dict(
+                app.aspect_preview_cached.__globals__,
+                {"ASPECT_PREVIEW_DIR": preview_dir, "extract_video_frame_at": mock.Mock(return_value=app.rel(target))},
+            ):
+                preview = app.aspect_preview_cached(str(source), source.stat().st_size, source.stat().st_mtime_ns, "16:9", (8, 7, 0, 0), 0.0)
+                sidecar = json.loads((Path(app.resolve(preview)).with_suffix(".jpg.sig.json")).read_text(encoding="utf-8-sig"))
+
+        self.assertTrue(Path(preview).name.startswith("source_aspectpreview_"))
+        self.assertNotIn("16x9", Path(preview).name)
+        self.assertEqual(sidecar["identity"]["aspect"], "16:9")
+        self.assertEqual(sidecar["identity"]["crop"], [8, 7, 0, 0])
 
     def test_source_preview_analysis_regenerates_without_cache_clear_attribute(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:

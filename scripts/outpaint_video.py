@@ -717,9 +717,8 @@ def combine_prompt(prompt: str, suffix: str) -> str:
 
 
 def default_chunk_manifest(source: Path, aspect: str, width: int, height: int, args) -> Path:
-    crops = [int(getattr(args, key, 0) or 0) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
-    crop = "" if not any(crops) else f"_crop{crops[0]}-{crops[1]}-{crops[2]}-{crops[3]}"
-    return ROOT / "manifests" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{crop}_chunks.csv"
+    crop, black = _crop_black(args)
+    return ROOT / "manifests" / "outpaint_chunks" / aid.outpaint_name(source.name, aspect, width, height, crop, black, "chunks", "csv")
 
 
 def read_chunk_manifest(path: Path) -> dict[int, dict[str, str]]:
@@ -1189,7 +1188,8 @@ def main() -> int:
     print(f"Prepared expanded canvas for ComfyUI: {prepared}", flush=True)
     if not args.dry_run:
         ffmpeg = find_ffmpeg()
-        chunk_dir = ROOT / ".cache" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(args.target_aspect)}_{work_width}x{work_height}{crop_slug(args)}"
+        chunk_crop, chunk_black = _crop_black(args)
+        chunk_dir = ROOT / ".cache" / "outpaint_chunks" / aid.outpaint_basename(source.name, args.target_aspect, work_width, work_height, chunk_crop, chunk_black, "chunks")
         chunk_manifest = resolve_path(args.chunk_manifest) if args.chunk_manifest else default_chunk_manifest(source, args.target_aspect, work_width, work_height, args)
         prepared_info = probe_video(prepared)
         chunk_existing = read_chunk_manifest(chunk_manifest)

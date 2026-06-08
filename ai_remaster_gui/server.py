@@ -39,7 +39,7 @@ from .manifests import (
     write_outpaint_chunk_rows,
 )
 from .models import COLORIZE_STAGE_KEYS, STAGES, Stage, output_stage
-from .paths import aspect_slug, even_int, newest, parse_aspect, rel, resolve, resolve_video_source, safe_stem
+from .paths import even_int, newest, rel, resolve, resolve_video_source
 from .project_io import (
     last_browse_dir,
     project_default_path,
@@ -145,6 +145,7 @@ from .media import (
     aspect_preview_at_for_settings,
     aspect_preview_cached,
     aspect_preview_for_settings,
+    aspect_preview_identity,
     auto_crop_for_settings,
     current_crop_values,
     detect_letterbox_crop,
@@ -1707,14 +1708,6 @@ def source_duration_text(source: Path) -> str:
     return f"{duration:.3f}" if duration > 0 else ""
 
 
-def outpaint_size_for(aspect: str, target_height_text: str = "720") -> tuple[int, int]:
-    try:
-        height = int(float(target_height_text or "720"))
-    except ValueError:
-        height = 720
-    return even_int(height * parse_aspect(aspect)), even_int(height)
-
-
 def source_video_height(source_text: str) -> int:
     try:
         source = resolve_video_source(source_text)
@@ -1735,15 +1728,6 @@ def outpaint_size_for_source(source_text: str, aspect: str, target_height_text: 
 
 def outpaint_work_size_for_source(source_text: str, aspect: str, target_height_text: str = "720") -> tuple[int, int]:
     return aid.work_size(source_video_height(source_text), aspect, target_height_text)
-
-
-def outpaint_crop_slug(values: dict[str, str]) -> str:
-    crops = [int(float(values.get(key, "0") or 0)) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
-    return "" if not any(crops) else f"_crop{crops[0]}-{crops[1]}-{crops[2]}-{crops[3]}"
-
-
-def outpaint_black_region_slug(values: dict[str, str]) -> str:
-    return "_allblack" if values.get("outpaint_all_black_regions", "false") == "true" else ""
 
 
 def outpaint_chunk_dir_for(source_text: str, values: dict[str, str]) -> Path:
