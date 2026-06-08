@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import IMAGE_EXTS, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS
+from .config import IMAGE_EXTS, QWEN_IMAGE_EDIT_MODEL, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS
 from .manifests import read_manifest, read_manifest_details, update_manifest_row, write_manifest_details
 from .media import extract_video_frame_at
 from .paths import rel, resolve, safe_stem
@@ -224,7 +224,7 @@ def reference_edit_preview_command(manifest_text: str, index: int, instruction: 
             "--model-backend",
             values.get("model_backend", "gguf"),
             "--gguf-model",
-            values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
             "--instruction",
             prompt,
             "--force",
@@ -250,7 +250,7 @@ def reference_edit_preview_command(manifest_text: str, index: int, instruction: 
             "--model-backend",
             values.get("model_backend", "gguf"),
             "--gguf-model",
-            values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
             "--prompt",
             prompt,
             "--prompt-suffix",
@@ -517,7 +517,7 @@ def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list
         "--model-backend",
         values.get("model_backend", "gguf"),
         "--gguf-model",
-        values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+        values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
         "--prompt",
         values.get("prompt", REFERENCE_PROMPT),
         "--prompt-suffix",

@@ -914,7 +914,7 @@ Invoke-Step 'Install custom-node requirements' {
 }
 
 Invoke-Step 'Create model directories' {
-    foreach ($dir in @('checkpoints','diffusion_models','loras','text_encoders','unet','vae','latent_upscale_models')) {
+    foreach ($dir in @('checkpoints','diffusion_models','loras','text_encoders','unet','vae','latent_upscale_models','mmaudio')) {
         Ensure-Directory (Join-Path $ComfyDir "models\$dir")
     }
 }
@@ -938,6 +938,25 @@ if ($DownloadModels -and -not $SkipModelDownloads) {
         Download-HfFile 'Comfy-Org/Qwen-Image_ComfyUI' 'split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors' (Join-Path $ComfyDir 'models\text_encoders\qwen_2.5_vl_7b_fp8_scaled.safetensors')
         Download-HfFile 'Comfy-Org/Qwen-Image_ComfyUI' 'split_files/vae/qwen_image_vae.safetensors' (Join-Path $ComfyDir 'models\vae\qwen_image_vae.safetensors')
         Download-HfFile 'lightx2v/Qwen-Image-Edit-2511-Lightning' 'Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors' (Join-Path $ComfyDir 'models\loras\Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors')
+    }
+
+    Invoke-Step 'Download soundtrack models (music + sound effects)' {
+        # Stable Audio Open is a gated model: accept its licence at
+        # https://huggingface.co/stabilityai/stable-audio-open-1.0 and run 'hf auth login'
+        # (or set HF_TOKEN) for this to succeed. Wrapped so a skip never fails the install;
+        # it is retried on demand when the Create Audio Track stage first runs.
+        try {
+            Download-HfFile 'stabilityai/stable-audio-open-1.0' 'model.safetensors' (Join-Path $ComfyDir 'models\checkpoints\stable_audio_open_1.0.safetensors')
+        } catch {
+            Write-Warning "Skipped Stable Audio Open (music). Accept the licence + 'hf auth login', or it downloads on first use. Details: $_"
+        }
+        foreach ($mmaudioFile in @('mmaudio_large_44k_v2_fp16.safetensors','mmaudio_vae_44k_fp16.safetensors','mmaudio_synchformer_fp16.safetensors','apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors')) {
+            try {
+                Download-HfFile 'Kijai/MMAudio_safetensors' $mmaudioFile (Join-Path $ComfyDir "models\mmaudio\$mmaudioFile")
+            } catch {
+                Write-Warning "Skipped MMAudio file $mmaudioFile (sound effects); it downloads on first use. Details: $_"
+            }
+        }
     }
 } else {
     Write-Host 'Skipping model downloads. Models and LoRAs will download on demand when their pipeline stages run.'

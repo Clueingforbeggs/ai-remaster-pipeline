@@ -7,7 +7,7 @@ from typing import Any
 
 import qwen_colorize_references as qwen
 from comfy_api import extract_output_files, node_by_id, queue_prompt, set_widget, wait_for_comfy, wait_for_prompt, workflow_to_prompt
-from common import ROOT, copy_to_comfy_input, file_fingerprint, newest_output, resolve_path, root_relative, resumable_output, write_signature
+from common import QWEN_IMAGE_EDIT_MODEL, ROOT, copy_to_comfy_input, file_fingerprint, newest_output, resolve_path, root_relative, resumable_output, write_signature
 from dependency_manager import ensure_qwen_image_edit_models
 
 
@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--comfy-dir", type=Path, default=Path(config.get("comfy_dir", ROOT / "tools" / "comfyui")))
     parser.add_argument("--comfy-output-root", type=Path, default=ROOT / "tools" / "comfyui" / "output")
     parser.add_argument("--model-backend", choices=["gguf", "safetensors"], default="gguf")
-    parser.add_argument("--gguf-model", default="qwen-image-edit-2511-Q4_K_M.gguf")
+    parser.add_argument("--gguf-model", default=QWEN_IMAGE_EDIT_MODEL)
     parser.add_argument("--load-image-node-id", default="auto")
     parser.add_argument("--load-image-widget", default="0")
     parser.add_argument("--prompt-node-id")

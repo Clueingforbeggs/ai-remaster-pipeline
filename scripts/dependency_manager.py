@@ -9,7 +9,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from common import ROOT
+from common import QWEN_IMAGE_EDIT_MODEL, ROOT
 
 
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -32,10 +32,28 @@ OUTPAINT_MODELS = [
 ]
 
 QWEN_IMAGE_EDIT_MODELS = [
-    HfModel("unsloth/Qwen-Image-Edit-2511-GGUF", "qwen-image-edit-2511-Q4_K_M.gguf", "models/diffusion_models/qwen-image-edit-2511-Q4_K_M.gguf"),
+    HfModel("unsloth/Qwen-Image-Edit-2511-GGUF", QWEN_IMAGE_EDIT_MODEL, f"models/diffusion_models/{QWEN_IMAGE_EDIT_MODEL}"),
     HfModel("Comfy-Org/Qwen-Image_ComfyUI", "split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors"),
     HfModel("Comfy-Org/Qwen-Image_ComfyUI", "split_files/vae/qwen_image_vae.safetensors", "models/vae/qwen_image_vae.safetensors"),
     HfModel("lightx2v/Qwen-Image-Edit-2511-Lightning", "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", "models/loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"),
+]
+
+# Music score: Stable Audio Open, loaded by ComfyUI core audio nodes from models/checkpoints.
+# NOTE: stable-audio-open-1.0 is a *gated* repo - the user must accept its licence on Hugging
+# Face and authenticate (`hf auth login` / HF_TOKEN) for the download to succeed. Audio models
+# are therefore fetched in soft mode (see ensure_audio_models): a failure logs guidance and
+# continues instead of aborting the run.
+MUSIC_MODELS = [
+    HfModel("stabilityai/stable-audio-open-1.0", "model.safetensors", "models/checkpoints/stable_audio_open_1.0.safetensors"),
+]
+
+# Sound effects: MMAudio (video -> synchronized audio), kijai's ComfyUI-ready safetensors.
+# These land in models/mmaudio/, where ComfyUI-MMAudio's loaders look by default.
+SFX_MODELS = [
+    HfModel("Kijai/MMAudio_safetensors", "mmaudio_large_44k_v2_fp16.safetensors", "models/mmaudio/mmaudio_large_44k_v2_fp16.safetensors"),
+    HfModel("Kijai/MMAudio_safetensors", "mmaudio_vae_44k_fp16.safetensors", "models/mmaudio/mmaudio_vae_44k_fp16.safetensors"),
+    HfModel("Kijai/MMAudio_safetensors", "mmaudio_synchformer_fp16.safetensors", "models/mmaudio/mmaudio_synchformer_fp16.safetensors"),
+    HfModel("Kijai/MMAudio_safetensors", "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors", "models/mmaudio/apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors"),
 ]
 
 
@@ -80,7 +98,13 @@ def ensure_huggingface_hub() -> None:
     subprocess.run([sys.executable, "-m", "pip", "install", "huggingface_hub"], check=True)
 
 
-def ensure_hf_models(comfy_dir: Path, models: list[HfModel]) -> None:
+def ensure_hf_models(comfy_dir: Path, models: list[HfModel], required: bool = True) -> None:
+    """Download each model to comfy_dir/destination if missing.
+
+    When ``required`` is False, a failed download (e.g. a gated repo without an access token)
+    logs actionable guidance and continues instead of raising, so an optional/gated model does
+    not abort the whole stage.
+    """
     ensure_huggingface_hub()
     from huggingface_hub import hf_hub_download, hf_hub_url
     import urllib.request
@@ -101,12 +125,23 @@ def ensure_hf_models(comfy_dir: Path, models: list[HfModel]) -> None:
                 print(f"Model already exists: {destination}", flush=True)
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            size = remote_file_size(model.repo, model.file)
-            size_text = f" ({format_bytes(size)})" if size else ""
-            print(f"Downloading model: {model.repo}/{model.file}{size_text}", flush=True)
-            downloaded = download_hf_file(model.repo, model.file, cache_root)
-            shutil.copy2(downloaded, destination)
-            print(f"Downloaded: {destination}", flush=True)
+            try:
+                size = remote_file_size(model.repo, model.file)
+                size_text = f" ({format_bytes(size)})" if size else ""
+                print(f"Downloading model: {model.repo}/{model.file}{size_text}", flush=True)
+                downloaded = download_hf_file(model.repo, model.file, cache_root)
+                shutil.copy2(downloaded, destination)
+                print(f"Downloaded: {destination}", flush=True)
+            except Exception as exc:
+                if required:
+                    raise
+                print(f"Warning: could not auto-download {model.repo}/{model.file}: {exc}", flush=True)
+                print(
+                    f"Warning: place the file manually at {destination}, or accept the model "
+                    f"licence on Hugging Face and authenticate (hf auth login / HF_TOKEN), then "
+                    f"retry. See docs/installer-model-sources.md. Continuing without it.",
+                    flush=True,
+                )
     finally:
         restore_env("PYTHONUTF8", old_python_utf8)
         restore_env("PYTHONIOENCODING", old_python_io)
@@ -155,3 +190,15 @@ def ensure_outpaint_models(comfy_dir: Path) -> None:
 
 def ensure_qwen_image_edit_models(comfy_dir: Path) -> None:
     ensure_hf_models(comfy_dir, QWEN_IMAGE_EDIT_MODELS)
+
+
+def ensure_audio_models(comfy_dir: Path, music: bool = True, sfx: bool = True) -> None:
+    """Fetch the soundtrack models on first use. Soft mode: failures (e.g. the gated Stable
+    Audio repo) log guidance and continue rather than aborting the Create Audio Track phase."""
+    models: list[HfModel] = []
+    if music:
+        models += MUSIC_MODELS
+    if sfx:
+        models += SFX_MODELS
+    if models:
+        ensure_hf_models(comfy_dir, models, required=False)

@@ -12,6 +12,11 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The single Qwen Image Edit model used everywhere we run Qwen (colour references, outpaint
+# guide frames, and shot-change seed guides). Mirrors ai_remaster_gui.config.QWEN_IMAGE_EDIT_MODEL
+# (the GUI and scripts are separate packages, so each keeps its own copy of the value).
+QWEN_IMAGE_EDIT_MODEL = "qwen-image-edit-2511-Q4_K_M.gguf"
+
 
 def resolve_path(path_text: str | Path) -> Path:
     path = Path(path_text)

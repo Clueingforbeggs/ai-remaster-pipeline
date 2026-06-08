@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import (
     CONFIG_FILE,
     OUTPAINT_PROMPT,
+    QWEN_IMAGE_EDIT_MODEL,
     REFERENCE_PROMPT,
     REFERENCE_PROMPT_SUFFIX,
     ROOT,
@@ -115,7 +116,7 @@ def qwen_masked_workflow_for(values: dict[str, str], config: dict[str, str]) -> 
 
 def load_settings() -> dict[str, dict[str, str]]:
     defaults = {stage.key: {key: default for key, _label, _kind, default in stage.fields} for stage in STAGES}
-    defaults["global"] = {"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "section_start": "0", "section_end": "", "last_browse_dir": ""}
+    defaults["global"] = {"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "add_soundtrack": "false", "section_start": "0", "section_end": "", "last_browse_dir": ""}
     app_module = sys.modules.get("ai_remaster_gui.app")
     settings_file = getattr(app_module, "SETTINGS_FILE", SETTINGS_FILE)
     newest_fn = getattr(app_module, "newest", newest) if app_module else newest
@@ -157,7 +158,7 @@ def load_settings() -> dict[str, dict[str, str]]:
     if not defaults["references"].get("save_node_id") or defaults["references"].get("save_node_id") == "9":
         defaults["references"]["save_node_id"] = "auto"
     defaults["references"].setdefault("model_backend", "gguf")
-    defaults["references"].setdefault("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")
+    defaults["references"].setdefault("gguf_model", QWEN_IMAGE_EDIT_MODEL)
     if not defaults["references"].get("masked_workflow"):
         defaults["references"]["masked_workflow"] = default_qwen_masked_workflow(config)
     defaults["references"].setdefault("method", "qwen")

@@ -126,7 +126,27 @@ function rangeFieldHtml(key, label, kind, value) {
   `;
 }
 
+const CHECKBOX_DESCRIPTIONS = {
+  seed_qwen_guides:
+    'Use this if LTX does not outpaint the source material (it hands back the black bars). ' +
+    'Before each chunk renders, a guide frame is generated at every detected shot change with ' +
+    'Qwen Image Edit ("Replace the black bars.") and fed to LTX as the anchor for that shot, so ' +
+    'it extends from a filled frame instead of copying the bars. Slower, but reliable on stubborn clips.',
+};
+
 function checkboxFieldHtml(key, label, value) {
+  const description = CHECKBOX_DESCRIPTIONS[key];
+  if (description) {
+    return `
+      <label class="checkbox-feature">
+        <input data-field="${key}" data-kind="checkbox" type="checkbox" ${value === 'true' ? 'checked' : ''}>
+        <span class="checkbox-feature-text">
+          <strong>${esc(label)}</strong>
+          <small>${esc(description)}</small>
+        </span>
+      </label>
+    `;
+  }
   return `
     <label class="checkbox-field">
       <input data-field="${key}" data-kind="checkbox" type="checkbox" ${value === 'true' ? 'checked' : ''}>
@@ -376,6 +396,9 @@ function logHtml(text) {
 function logClass(line) {
   const lower = String(line).toLowerCase();
   if (lower.includes('polling temporarily failed')) return 'log-warn';
+  // Lines explicitly labelled "Warning:"/"Notice:" stay yellow even if they contain words
+  // like "failed" — check this before the error pattern below.
+  if (/^\s*(warning|notice):/.test(lower)) return 'log-warn';
   if (/traceback|runtimeerror|exception|error|failed|refused|exit code [1-9]|filenotfound|permissionerror/.test(lower)) return 'log-error';
   if (/warning|skipping|timed out/.test(lower)) return 'log-warn';
   if (/ready|reuse|wrote|finished with exit code 0|started/.test(lower)) return 'log-ok';

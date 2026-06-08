@@ -18,6 +18,7 @@ from .config import (
     MEDIA_CLIP_DIR,
     OUTPAINT_PROMPT,
     PREVIEW_DIR,
+    QWEN_IMAGE_EDIT_MODEL,
     REFERENCE_PROMPT,
     REFERENCE_PROMPT_SUFFIX,
     ROOT,
@@ -228,6 +229,8 @@ def source_workflow_defaults(info: dict[str, str], monochrome: bool | None = Non
             stage_defaults.setdefault("outpaint", {})["target_aspect"] = "16:9"
         if needs_upscale:
             stage_defaults.setdefault("upscale", {}).update({"target_width": "1920", "target_height": "1080"})
+    # Default the soundtrack phase on only when the source has no audio track (a silent film).
+    global_defaults["add_soundtrack"] = "false" if str(info.get("audio", "")).strip() else "true"
     if monochrome is not None:
         global_defaults["colorize"] = "true" if monochrome else "false"
     return global_defaults, stage_defaults
@@ -290,6 +293,9 @@ class PipelineApp:
     def upscale_enabled(self) -> bool:
         return self.settings.get("global", {}).get("upscale", "false") == "true"
 
+    def soundtrack_enabled(self) -> bool:
+        return self.settings.get("global", {}).get("add_soundtrack", "false") == "true"
+
     def active_stages(self) -> tuple[Stage, ...]:
         by_key = {stage.key: stage for stage in STAGES}
         stages: list[Stage] = []
@@ -299,9 +305,18 @@ class PipelineApp:
             stages.extend(by_key[key] for key in ("shots", "references", "colour"))
         if self.outpaint_enabled() or self.colorize_enabled():
             stages.append(by_key["recomp"])
+        if self.soundtrack_enabled():
+            stages.append(by_key["audio"])
         if self.upscale_enabled():
             stages.append(by_key["upscale"])
         return tuple(stages)
+
+    def soundtrack_source_for(self) -> str:
+        """The video the soundtrack phase attaches sound to: the recomposed render when
+        earlier processing is enabled, otherwise the selected source section."""
+        if self.outpaint_enabled() or self.colorize_enabled():
+            return self.settings.get("recomp", {}).get("output") or recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
+        return pipeline_source_text(self.settings)
 
     def save(self) -> None:
         SETTINGS_FILE.write_text(json.dumps(self.settings, indent=2) + "\n", encoding="utf-8")
@@ -483,6 +498,27 @@ class PipelineApp:
                 percent, label = 100, "Composite written"
             else:
                 label = "Compositing"
+        elif self.running_stage_key == "audio":
+            label = "Creating audio track"
+            milestones = [
+                ("checking model", 5, "Checking audio models"),
+                ("downloading model", 7, "Downloading audio models"),
+                ("waiting for comfyui", 9, "Waiting for ComfyUI"),
+                ("detecting scenes", 12, "Detecting scenes"),
+                ("captioning scene", 18, "Captioning scenes (Qwen-VL)"),
+                ("composing music cue", 30, "Composing music"),
+                ("wrote music stem", 55, "Music ready"),
+                ("preparing sfx proxy", 58, "Preparing SFX proxies"),
+                ("generating sfx chunk", 62, "Generating sound effects (MMAudio)"),
+                ("wrote sfx stem", 85, "Sound effects ready"),
+                ("mixing audio stems", 90, "Mixing stems"),
+                ("muxing soundtrack", 96, "Muxing soundtrack"),
+                ("wrote soundtrack", 100, "Soundtrack written"),
+                ("reuse soundtrack", 100, "Soundtrack ready"),
+            ]
+            for token, value, text in milestones:
+                if token in lower and value >= percent:
+                    percent, label = value, text
         elif self.running_stage_key == "upscale":
             label = "Upscaling"
             milestones = [
@@ -577,6 +613,7 @@ class PipelineApp:
                         labels = [
                             f"Outpainting {'on' if global_defaults.get('expand_outpaint') == 'true' else 'off'}",
                             f"Upscaling {'on' if global_defaults.get('upscale') == 'true' else 'off'}",
+                            f"Soundtrack {'on' if global_defaults.get('add_soundtrack') == 'true' else 'off'}",
                         ]
                         self.log.append(f"Applied source-based workflow defaults: {', '.join(labels)}.")
         self.settings.setdefault(stage, {}).update({key: str(value) for key, value in values.items()})
@@ -703,7 +740,7 @@ class PipelineApp:
             self.save()
 
     def clear_overview(self) -> None:
-        self.settings.setdefault("global", {}).update({"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "section_start": "0", "section_end": ""})
+        self.settings.setdefault("global", {}).update({"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "add_soundtrack": "false", "section_start": "0", "section_end": ""})
         self.clear_derived_stage_inputs()
         self.log.append("Cleared source material from the Overview.")
         self.save()
@@ -744,6 +781,7 @@ class PipelineApp:
             "references": ("manifest", "outpainted_video", "colorized_video"),
             "colour": ("manifest", "outpainted_video", "colorized_video"),
             "recomp": ("outpainted_video", "source", "colorized_video", "output", "manifest"),
+            "audio": ("input_video", "output"),
             "upscale": ("input_video", "output"),
             "output": ("output", "outpainted_video", "manifest", "colorized_video"),
         }.items():
@@ -810,6 +848,14 @@ class PipelineApp:
         output = recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
         if output:
             self.settings.setdefault("recomp", {})["output"] = output
+        soundtrack_source = self.soundtrack_source_for()
+        if soundtrack_source:
+            self.settings.setdefault("audio", {})["input_video"] = soundtrack_source
+            soundtrack_output = soundtrack_output_for(soundtrack_source, self.settings.get("audio", {}))
+            if soundtrack_output:
+                self.settings.setdefault("audio", {})["output"] = soundtrack_output
+        elif not self.soundtrack_enabled():
+            self.settings.setdefault("audio", {})["input_video"] = ""
         upscale_input = self.upscale_input_for()
         if upscale_input:
             self.settings.setdefault("upscale", {})["input_video"] = upscale_input
@@ -837,6 +883,10 @@ class PipelineApp:
             return colorized_outputs_for_manifest(values.get("manifest", ""), values.get("method", "deepexemplar"))
         if stage_key == "recomp":
             output = values.get("output") or recomposition_output_for(values.get("outpainted_video", ""))
+            return [output] if output else []
+        if stage_key == "audio":
+            source = self.soundtrack_source_for()
+            output = soundtrack_output_for(source, values) if source else ""
             return [output] if output else []
         if stage_key == "upscale":
             source = self.upscale_input_for() or values.get("input_video")
@@ -872,6 +922,23 @@ class PipelineApp:
                 add(["--guide-end-strength", values.get("guide_end_strength", "1.0")])
             if values.get("outpaint_all_black_regions", "false") == "true":
                 add(["--outpaint-all-black-regions"])
+            if values.get("seed_qwen_guides", "false") == "true":
+                ref = self.settings.get("references", {})
+                comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
+                qwen_workflow = qwen_workflow_for(ref, config) or ref.get("workflow", "")
+                add(["--seed-qwen-guides"])
+                if qwen_workflow:
+                    add(["--qwen-workflow", qwen_workflow])
+                add(["--qwen-model-backend", ref.get("model_backend", "gguf")])
+                add(["--qwen-gguf-model", ref.get("gguf_model", QWEN_IMAGE_EDIT_MODEL)])
+                add(["--qwen-prompt", DEFAULT_ANCHOR_PROMPT])
+                add(["--qwen-load-image-node-id", ref.get("load_image_node_id", "auto")])
+                add(["--qwen-save-node-id", ref.get("save_node_id", "auto")])
+                add(["--comfy-output-root", ref.get("comfy_output_root") or str(Path(comfy_dir) / "output")])
+                shot_values = self.settings.get("shots", {})
+                add(["--seed-sample-seconds", shot_values.get("sample_seconds", "0") or "0"])
+                add(["--seed-shot-threshold", shot_values.get("shot_threshold", "0.075") or "0.075"])
+                add(["--seed-min-shot-seconds", shot_values.get("min_shot_seconds", "1.0") or "1.0"])
             manifest = outpaint_chunk_manifest_for(pipeline_source_text(self.settings), values)
             if manifest:
                 add(["--chunk-manifest", manifest])
@@ -914,7 +981,7 @@ class PipelineApp:
                 comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
                 add(["--manifest", values.get("manifest", ""), "--workflow", workflow, "--comfy-url", comfy_url])
                 add(["--comfy-dir", comfy_dir, "--comfy-output-root", comfy_output])
-                add(["--model-backend", values.get("model_backend", "gguf"), "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf")])
+                add(["--model-backend", values.get("model_backend", "gguf"), "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL)])
                 add(["--prompt", values.get("prompt", ""), "--prompt-suffix", values.get("prompt_suffix", ""), "--load-image-node-id", values.get("load_image_node_id", "auto"), "--save-node-id", values.get("save_node_id", "auto")])
                 if values.get("prompt_node_id"):
                     add(["--prompt-node-id", values["prompt_node_id"]])
@@ -956,6 +1023,36 @@ class PipelineApp:
             height_text = outpaint_values.get("target_height", "720")
             delivery_w, delivery_h = outpaint_size_for_source(source_text, aspect, height_text)
             add(["--output-width", str(delivery_w), "--output-height", str(delivery_h)])
+        elif stage_key == "audio":
+            cmd.append(str(SCRIPTS / "create_audio_track.py"))
+            source = self.soundtrack_source_for() or values.get("input_video", "")
+            output = soundtrack_output_for(source, values)
+            add(["--input", source, "--output", output])
+            add(["--comfy-dir", config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))])
+            add(["--comfy-url", config.get("comfy_url", "http://127.0.0.1:8188")])
+            add(["--comfy-output-root", str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output")])
+            if values.get("create_music", "true") == "true":
+                add(["--music"])
+            if values.get("create_sfx", "true") == "true":
+                add(["--sfx"])
+            if values.get("music_prompt"):
+                add(["--music-prompt", values.get("music_prompt", "")])
+            if values.get("music_negative_prompt"):
+                add(["--music-negative", values.get("music_negative_prompt", "")])
+            add(["--music-cue-seconds", values.get("music_cue_seconds", "30")])
+            if values.get("music_checkpoint"):
+                add(["--music-checkpoint", values.get("music_checkpoint", "")])
+            if values.get("sfx_prompt"):
+                add(["--sfx-prompt", values.get("sfx_prompt", "")])
+            if values.get("sfx_negative_prompt"):
+                add(["--sfx-negative", values.get("sfx_negative_prompt", "")])
+            add(["--sfx-chunk-seconds", values.get("sfx_chunk_seconds", "8")])
+            add(["--sfx-short-side", values.get("sfx_short_side", "384")])
+            add(["--music-gain-db", values.get("music_gain_db", "-9")])
+            add(["--sfx-gain-db", values.get("sfx_gain_db", "0")])
+            add(["--seed", values.get("seed", "42")])
+            if values.get("caption_node"):
+                add(["--caption-node", values.get("caption_node", "")])
         elif stage_key == "upscale":
             source = self.upscale_input_for() or values.get("input_video")
             output = upscale_output_for(source, values) or values.get("output")
@@ -975,9 +1072,19 @@ class PipelineApp:
             return False, "Colorize is disabled on the Overview tab."
         if stage_key == "recomp" and not (self.outpaint_enabled() or self.colorize_enabled()):
             return False, "Recomposition is only needed when Outpainting or Colorize is enabled."
+        if stage_key == "audio" and not self.soundtrack_enabled():
+            return False, "Create Audio Track is disabled on the Overview tab."
         if stage_key == "upscale" and not self.upscale_enabled():
             return False, "Upscale is disabled on the Overview tab."
         stage = next(item for item in STAGES if item.key == stage_key)
+        if stage_key == "audio":
+            self.hydrate_stage_inputs("audio")
+            audio_values = self.settings.get("audio", {})
+            if audio_values.get("create_music", "true") != "true" and audio_values.get("create_sfx", "true") != "true":
+                return False, "Enable Create Music and/or Create Sound Effects on the Audio tab."
+            source_text = self.soundtrack_source_for()
+            if not source_text or not resolve(source_text).exists():
+                return False, "No finished video is available to add a soundtrack to yet. Run Recomposition first when earlier phases are enabled."
         if stage_key == "upscale":
             self.hydrate_stage_inputs("upscale")
             if not self.upscale_input_for():
@@ -999,7 +1106,7 @@ class PipelineApp:
             if not source_text or not resolve(source_text).exists():
                 return False, "Upscaling input is not available yet. Run Recomposition first when earlier phases are enabled."
         needs_comfy = (
-            stage_key in {"outpaint", "colour"}
+            stage_key in {"outpaint", "colour", "audio"}
             or (stage_key == "references" and values.get("method", "qwen") != "openai")
             or stage_key == "upscale"
         )
@@ -1246,6 +1353,11 @@ class PipelineApp:
         return True, f"Started Qwen guide frame generation for chunk {chunk_index + 1}, guide {guide_index}."
 
     def upscale_input_for(self) -> str:
+        if self.soundtrack_enabled():
+            soundtrack_source = self.soundtrack_source_for()
+            soundtrack_output = soundtrack_output_for(soundtrack_source, self.settings.get("audio", {})) if soundtrack_source else ""
+            if soundtrack_output:
+                return soundtrack_output
         if self.outpaint_enabled() or self.colorize_enabled():
             recomposed = self.settings.get("recomp", {}).get("output") or recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
             return recomposed
@@ -1291,12 +1403,18 @@ class PipelineApp:
         upscale = self.settings.get("upscale", {})
         upscale_output = upscale_output_for(self.upscale_input_for() or upscale.get("input_video"), upscale) or upscale.get("output")
         recomposed = self.settings.get("recomp", {}).get("output") or recomposition_output_for(self.settings.get("recomp", {}).get("outpainted_video", ""))
+        soundtrack_source = self.soundtrack_source_for()
+        soundtrack_output = soundtrack_output_for(soundtrack_source, self.settings.get("audio", {})) if (self.soundtrack_enabled() and soundtrack_source) else ""
         if upscale_output and resolve(upscale_output).exists():
             return {"path": upscale_output, "kind": "upscaled", "label": "Upscaled output"}
+        if soundtrack_output and resolve(soundtrack_output).exists():
+            return {"path": soundtrack_output, "kind": "soundtrack", "label": "Soundtrack output"}
         if recomposed and resolve(recomposed).exists():
             return {"path": recomposed, "kind": "recomposed", "label": "Recomposed output"}
         if self.upscale_enabled() and upscale_output:
             return {"path": upscale_output, "kind": "upscaled_pending", "label": "Pending upscaled output"}
+        if soundtrack_output:
+            return {"path": soundtrack_output, "kind": "soundtrack_pending", "label": "Pending soundtrack output"}
         if recomposed:
             return {"path": recomposed, "kind": "recomposed_pending", "label": "Pending recomposed output"}
         return {"path": "", "kind": "", "label": ""}
@@ -1545,6 +1663,19 @@ def upscale_output_for(source_text: str, values: dict[str, str]) -> str:
     width, height = upscale_target_size(values)
     method = "flashvsr"
     return rel(ROOT / "output" / "upscaled" / f"{safe_stem(source.name)}_{method}_{width}x{height}.mp4")
+
+
+def soundtrack_output_for(source_text: str, values: dict[str, str]) -> str:
+    if not source_text:
+        return ""
+    source = resolve(source_text)
+    tags = []
+    if values.get("create_music", "true") == "true":
+        tags.append("music")
+    if values.get("create_sfx", "true") == "true":
+        tags.append("sfx")
+    tag = "_".join(tags) or "audio"
+    return rel(ROOT / "output" / "with_soundtrack" / f"{safe_stem(source.name)}_{tag}.mp4")
 
 
 def upscale_preview_output_for(source_text: str, values: dict[str, str]) -> str:

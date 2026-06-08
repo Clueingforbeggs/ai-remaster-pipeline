@@ -71,6 +71,7 @@ def ensure_node_types(comfy_url: str, required: dict[str, str], context: str = "
         "ComfyUI-VideoHelperSuite": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite -> ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "ComfyUI-FlashVSR_Ultra_Fast": "https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast -> ComfyUI/custom_nodes/ComfyUI-FlashVSR_Ultra_Fast",
         "ComfyUI-Reference-Based-Video-Colorization": "https://github.com/jonstreeter/ComfyUI-Reference-Based-Video-Colorization -> ComfyUI/custom_nodes/reference-video-colorization",
+        "ComfyUI-MMAudio": "https://github.com/kijai/ComfyUI-MMAudio -> ComfyUI/custom_nodes/ComfyUI-MMAudio",
     }
     hints = "; ".join(install_hints.get(package, package) for package in sorted(set(required[node_type] for node_type in missing)))
     raise RuntimeError(

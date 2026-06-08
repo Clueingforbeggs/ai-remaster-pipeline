@@ -21,6 +21,10 @@ REFERENCE_PROMPT = "Colorize this image."
 REFERENCE_PROMPT_SUFFIX = "Preserve composition, lighting, identity, and detail. Do not add text or new objects."
 OUTPAINT_PROMPT = "outpaint"
 
+# The single Qwen Image Edit model used everywhere we run Qwen (colour references, outpaint
+# guide frames, and shot-change seed guides). Keep this as the one source of truth.
+QWEN_IMAGE_EDIT_MODEL = "qwen-image-edit-2511-Q4_K_M.gguf"
+
 
 def load_config() -> dict[str, str]:
     config = {

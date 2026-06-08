@@ -17,4 +17,26 @@ Model downloads are handled on demand by the pipeline stage that needs them. `in
 - VAE: `Comfy-Org/Qwen-Image_ComfyUI/split_files/vae/qwen_image_vae.safetensors`
 - Lightning LoRA: `lightx2v/Qwen-Image-Edit-2511-Lightning/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`
 
+## Soundtrack (Create Audio Track)
+
+Fetched on demand when the Create Audio Track stage first runs (and prefetched by
+`install_windows.ps1 -DownloadModels`). These are downloaded in **soft mode** — a failure
+logs guidance and continues instead of aborting the stage.
+
+### Music — Stable Audio Open (ComfyUI core audio nodes)
+- Checkpoint: `stabilityai/stable-audio-open-1.0/model.safetensors` → `models/checkpoints/stable_audio_open_1.0.safetensors`
+- **Gated model.** Accept the licence at https://huggingface.co/stabilityai/stable-audio-open-1.0
+  and authenticate (`hf auth login`, or set `HF_TOKEN`) before the download can succeed. If it
+  is skipped, place the file manually at the destination above.
+
+### Sound effects — MMAudio (`kijai/ComfyUI-MMAudio`)
+Downloaded into `models/mmaudio/`:
+- `Kijai/MMAudio_safetensors/mmaudio_large_44k_v2_fp16.safetensors`
+- `Kijai/MMAudio_safetensors/mmaudio_vae_44k_fp16.safetensors`
+- `Kijai/MMAudio_safetensors/mmaudio_synchformer_fp16.safetensors`
+- `Kijai/MMAudio_safetensors/apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors`
+
+(Confirm the exact filenames against the repo if a download 404s; update `SFX_MODELS` in
+`scripts/dependency_manager.py` to match.)
+
 These are large files. The downloader skips already-present destination files and keeps Hugging Face cache files under `.cache/huggingface` while downloading.

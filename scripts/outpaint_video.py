@@ -12,6 +12,7 @@ from typing import Any
 
 from comfy_api import extract_output_files, ensure_node_types, node_by_id, queue_prompt, set_widget, wait_for_comfy, wait_for_prompt, workflow_to_prompt
 from common import (
+    QWEN_IMAGE_EDIT_MODEL,
     ROOT,
     copy_to_comfy_input,
     file_fingerprint,
@@ -28,6 +29,7 @@ from common import (
 from dependency_manager import ensure_outpaint_models
 from prepare_outpaint_input import default_output as default_prepared_output
 from prepare_outpaint_input import even, parse_aspect, probe_video
+from qwen_seed_guides import DEFAULT_SEED_PROMPT, seed_guides
 
 
 DEFAULT_WORKFLOW = ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json"
@@ -828,6 +830,56 @@ def sync_chunk_manifest(path: Path, ranges: list[tuple[int, int, int]], fps: flo
     return {int(row["chunk_index"]): row for row in rows}
 
 
+def apply_qwen_seed_guides(args, prepared: Path, ranges: list[tuple[int, int, int]], chunk_manifest: Path) -> dict[int, dict[str, str]]:
+    """Generate Qwen guide frames at shot changes and merge them into the chunk manifest.
+
+    Existing user-authored guides are preserved; previously-seeded guides (marked seed=True)
+    are refreshed. Returns the updated chunk overrides so the render loop sees the new guides.
+    """
+    comfy_output_root = resolve_path(args.comfy_output_root) if args.comfy_output_root else resolve_path(args.comfy_dir) / "output"
+    qwen_args = {
+        "workflow": args.qwen_workflow,
+        "comfy_url": args.comfy_url,
+        "comfy_dir": str(resolve_path(args.comfy_dir)),
+        "comfy_output_root": str(comfy_output_root),
+        "model_backend": args.qwen_model_backend,
+        "gguf_model": args.qwen_gguf_model,
+        "prompt": args.qwen_prompt,
+        "load_image_node_id": args.qwen_load_image_node_id,
+        "save_node_id": args.qwen_save_node_id,
+    }
+    print(f"Seeding Qwen guide frames at shot changes (prompt: {json.dumps(args.qwen_prompt)})...", flush=True)
+    seeded = seed_guides(
+        prepared, ranges, safe_stem(chunk_manifest.stem), qwen_args,
+        sample_seconds=args.seed_sample_seconds,
+        shot_threshold=args.seed_shot_threshold,
+        min_shot_seconds=args.seed_min_shot_seconds,
+        start_strength=getattr(args, "guide_strength", 0.7),
+        force=args.force,
+    )
+    rows = read_chunk_manifest(chunk_manifest)
+    for chunk_index, guides in seeded.items():
+        row = rows.get(chunk_index)
+        if row is None:
+            continue
+        raw = (row.get("guide_frames", "") or "").strip()
+        try:
+            existing = json.loads(raw) if raw else []
+            if not isinstance(existing, list):
+                existing = []
+        except (json.JSONDecodeError, ValueError):
+            existing = []
+        # Keep user guides; drop stale seeded ones; don't collide with a user frame_idx.
+        kept = [g for g in existing if not (isinstance(g, dict) and g.get("seed"))]
+        user_frame_idxs = {int(g.get("frame_idx", 0)) for g in kept if isinstance(g, dict)}
+        merged = kept + [g for g in guides if int(g.get("frame_idx", 0)) not in user_frame_idxs]
+        merged.sort(key=lambda g: int(g.get("frame_idx", 0)))
+        row["guide_frames"] = json.dumps(merged)
+        rows[chunk_index] = row
+    write_chunk_manifest(chunk_manifest, [rows[key] for key in sorted(rows)])
+    return read_chunk_manifest(chunk_manifest)
+
+
 def split_chunk(ffmpeg: str, prepared: Path, chunk_path: Path, start_frame: int, end_frame: int, fps: float, force: bool, offset_x: int = 0, offset_y: int = 0) -> None:
     if chunk_path.exists() and not force:
         return
@@ -1036,6 +1088,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--black-lift", type=float, default=0.018)
     parser.add_argument("--gamma", type=float, default=1.06)
     parser.add_argument("--outpaint-all-black-regions", action="store_true", help="Leave source blacks untouched so black regions inside the source can be outpainted.")
+    # Qwen guide seeding: when LTX won't outpaint, auto-generate filled guide frames at every
+    # shot change with Qwen Image Edit so each shot anchors from a frame whose bars are filled.
+    parser.add_argument("--seed-qwen-guides", action="store_true", help="Before rendering, detect shot changes and auto-add a Qwen-outpainted guide frame at each one.")
+    parser.add_argument("--qwen-workflow", default=str(ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2511).json"))
+    parser.add_argument("--qwen-model-backend", default="gguf")
+    parser.add_argument("--qwen-gguf-model", default=QWEN_IMAGE_EDIT_MODEL)
+    parser.add_argument("--qwen-prompt", default=DEFAULT_SEED_PROMPT, help="Prompt sent to Qwen Image Edit for each seed guide frame.")
+    parser.add_argument("--qwen-load-image-node-id", default="auto")
+    parser.add_argument("--qwen-save-node-id", default="auto")
+    parser.add_argument("--seed-sample-seconds", type=float, default=0.0, help="Shot-detection sampling interval for seeding (0 = every frame).")
+    parser.add_argument("--seed-shot-threshold", type=float, default=0.075)
+    parser.add_argument("--seed-min-shot-seconds", type=float, default=1.0)
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -1126,6 +1190,8 @@ def main() -> int:
         ranges = chunk_ranges_from_manifest(int(prepared_info["frames"]), float(prepared_info["fps"]), args.chunk_seconds, args.overlap_frames, chunk_existing)
         chunk_overrides = sync_chunk_manifest(chunk_manifest, ranges, float(prepared_info["fps"]), chunk_dir, args.seed)
         print(f"Outpaint chunk manifest: {chunk_manifest}", flush=True)
+        if args.seed_qwen_guides:
+            chunk_overrides = apply_qwen_seed_guides(args, prepared, ranges, chunk_manifest)
         raw_sig = raw_signature(args, workflow_path, prepared, chunk_manifest=chunk_manifest)  # outer whole-run signature
         if args.only_chunk is None and not args.force and resumable_output(raw_output, raw_sig, video_like=prepared):
             print(f"Reuse raw Comfy render: {raw_output}", flush=True)

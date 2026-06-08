@@ -961,6 +961,7 @@ async function saveGlobalPipelineOptions() {
       expand_outpaint: String(document.getElementById('globalExpandOutpaint').checked),
       colorize: String(document.getElementById('globalColorize').checked),
       upscale: String(document.getElementById('globalUpscale').checked),
+      add_soundtrack: String(document.getElementById('globalSoundtrack').checked),
     },
   });
 

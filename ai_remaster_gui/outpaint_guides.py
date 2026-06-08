@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import IMAGE_EXTS, ROOT, SCRIPTS
+from .config import IMAGE_EXTS, QWEN_IMAGE_EDIT_MODEL, ROOT, SCRIPTS
 from .manifests import read_outpaint_chunk_rows, write_outpaint_chunk_rows
 from .media import extract_video_frame_at
 from .paths import rel, resolve, resolve_video_source
@@ -161,7 +161,7 @@ def guide_frame_generation_command(chunk_index: int, guide_index: int, frame_idx
         "--comfy-dir", config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
         "--comfy-output-root", values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
         "--model-backend", values.get("model_backend", "gguf"),
-        "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+        "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
         "--prompt", guide_prompt,
         "--prompt-suffix", "",
         "--load-image-node-id", values.get("load_image_node_id", "auto"),
@@ -345,7 +345,7 @@ def outpaint_guide_generation_command(index: int, prompt: str) -> tuple[list[str
         "--model-backend",
         values.get("model_backend", "gguf"),
         "--gguf-model",
-        values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+        values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
         "--prompt",
         guide_prompt,
         "--prompt-suffix",
@@ -422,7 +422,7 @@ def outpaint_end_guide_generation_command(index: int, prompt: str) -> tuple[list
         "--model-backend",
         values.get("model_backend", "gguf"),
         "--gguf-model",
-        values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+        values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
         "--prompt",
         guide_prompt,
         "--prompt-suffix",
@@ -612,7 +612,7 @@ def guide_edit_preview_command(chunk_index: int, guide_index: int, instruction: 
             "--comfy-dir", comfy_dir,
             "--comfy-output-root", comfy_output,
             "--model-backend", values.get("model_backend", "gguf"),
-            "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
             "--instruction", prompt,
             "--no-normalize-to-source-size",
             "--force",
@@ -628,7 +628,7 @@ def guide_edit_preview_command(chunk_index: int, guide_index: int, instruction: 
             "--comfy-dir", comfy_dir,
             "--comfy-output-root", comfy_output,
             "--model-backend", values.get("model_backend", "gguf"),
-            "--gguf-model", values.get("gguf_model", "qwen-image-edit-2511-Q4_K_M.gguf"),
+            "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
             "--prompt", prompt,
             "--prompt-suffix", "",
             "--load-image-node-id", values.get("load_image_node_id", "auto"),

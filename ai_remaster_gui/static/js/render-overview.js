@@ -4,7 +4,8 @@ function drawGlobal() {
   const expandOutpaint = global.expand_outpaint !== 'false';
   const colorize = global.colorize !== 'false';
   const upscale = global.upscale === 'true';
-  const noProcessing = !expandOutpaint && !colorize && !upscale;
+  const soundtrack = global.add_soundtrack === 'true';
+  const noProcessing = !expandOutpaint && !colorize && !upscale && !soundtrack;
   const analysis = state.source_analysis || {};
   const sourceTone = source && !analysis.ready
     ? (analysis.message || 'Analyzing source material')
@@ -29,7 +30,7 @@ function drawGlobal() {
       ${overviewSourcePicker(source)}
       ${sourceAnalysisHtml(analysis)}
       ${overviewSectionPicker(global, source)}
-      ${workflowPickerHtml(expandOutpaint, colorize, upscale, sourceTone)}
+      ${workflowPickerHtml(expandOutpaint, colorize, upscale, soundtrack, sourceTone)}
       ${noProcessing ? '<div class="inline-warning"><strong>No processing stages selected.</strong> Choose at least one workflow step, otherwise Run Whole Remaster has nothing to do.</div>' : ''}
       <div id="overviewFilmstrip">${overviewFilmstripInner()}</div>
       <div id="overviewSourceInfo">${sourceInfoHtml(state.source_info || {})}</div>
@@ -44,10 +45,11 @@ function drawGlobal() {
   document.getElementById('globalExpandOutpaint').addEventListener('change', saveGlobalPipelineOptions);
   document.getElementById('globalColorize').addEventListener('change', saveGlobalPipelineOptions);
   document.getElementById('globalUpscale').addEventListener('change', saveGlobalPipelineOptions);
+  document.getElementById('globalSoundtrack').addEventListener('change', saveGlobalPipelineOptions);
   bindOverviewSectionControls();
 }
 
-function workflowPickerHtml(expandOutpaint, colorize, upscale, sourceTone) {
+function workflowPickerHtml(expandOutpaint, colorize, upscale, soundtrack, sourceTone) {
   return `
     <div class="workflow-list">
       ${workflowOptionHtml({
@@ -64,6 +66,13 @@ function workflowPickerHtml(expandOutpaint, colorize, upscale, sourceTone) {
         title: 'Colorize',
         body: 'Detect shots, make reference frames, and colorize the video before recomposition.',
         note: sourceTone,
+      })}
+      ${workflowOptionHtml({
+        id: 'globalSoundtrack',
+        checked: soundtrack,
+        icon: 'audio',
+        title: 'Create Audio Track',
+        body: 'Generate a musical score and/or synchronized sound effects for a silent film, after recomposition and before upscaling. Defaults off when the source already has audio.',
       })}
       ${workflowOptionHtml({
         id: 'globalUpscale',
