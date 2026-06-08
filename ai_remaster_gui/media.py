@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable
-from functools import lru_cache
 from pathlib import Path
 
 from .cache import human_size
@@ -42,7 +41,6 @@ def source_previews_for_analysis(signature: tuple[str, int, int], info: dict[str
             return tuple(rel(frame) for frame in frames)
         APP.log.append(f"Generating source previews from: {source}")
         generate_video_previews(source, target_dir, progress, parse_duration(info.get("duration")))
-        source_previews_cached.cache_clear()
         APP.log.append(f"Generated source previews in: {target_dir}")
         return tuple(rel(frame) for frame in frames if frame.exists())
     except Exception as exc:
@@ -356,7 +354,6 @@ def extract_video_frame(source: Path, target_dir: Path, suffix: str) -> str:
     return extract_video_frame_at(source, target_dir, suffix, 10.0)
 
 def extract_video_frame_at(source: Path, target_dir: Path, suffix: str, seconds: float) -> str:
-    import hashlib
     ffmpeg = local_tool("ffmpeg")
     if not ffmpeg:
         return ""
@@ -551,8 +548,9 @@ def human_bitrate(value: str | int | float) -> str:
     return f"{bits:.0f} bps"
 
 def safe_preview_name(path: Path) -> str:
-    text = str(path.resolve()).replace(":", "").replace("\\", "_").replace("/", "_")
-    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)[:180]
+    stem = safe_stem(path.name) or "media"
+    digest = hashlib.sha1(str(path.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{stem[:64]}_{digest}"
 
 def media_clip_path(source: Path, start: float, end: float, key: str = "") -> Path:
     ffmpeg = local_tool("ffmpeg")

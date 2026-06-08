@@ -1854,6 +1854,37 @@ class GuiSmokeTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             app.media_clip_path(app.ROOT / "does-not-exist.mp4", 0, 1, "smoke")
 
+    def test_preview_cache_name_uses_short_stem_and_hash(self) -> None:
+        source = Path(r"C:\Users\mdamberger\AppData\Local\Programs\ai-remaster-pipeline\intermediate\source_sections\DrWho_Wheel_in_space_0000000000_0000154040.mp4")
+
+        name = app.safe_preview_name(source)
+        preview = Path(r"C:\Users\mdamberger\AppData\Local\Programs\ai-remaster-pipeline\.cache\aspect_previews") / f"{name}_16x9_crop8-7-0-0_0000000000_v4.jpg"
+
+        self.assertTrue(name.startswith("DrWho_Wheel_in_space_0000000000_0000154040_"))
+        self.assertNotIn("AppData_Local_Programs", name)
+        self.assertLess(len(str(preview)), 240)
+
+    def test_source_preview_analysis_regenerates_without_cache_clear_attribute(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "source.mp4"
+            source.write_bytes(b"video placeholder")
+            preview_dir = folder / "previews"
+            signature = (str(source), source.stat().st_size, source.stat().st_mtime_ns)
+
+            def fake_generate_video_previews(_source, target_dir, progress=None, duration=None):
+                target_dir.mkdir(parents=True, exist_ok=True)
+                for index in range(app.source_previews_for_analysis.__globals__["SOURCE_PREVIEW_COUNT"]):
+                    (target_dir / f"preview_{index}.jpg").write_bytes(b"preview")
+
+            with mock.patch.dict(
+                app.source_previews_for_analysis.__globals__,
+                {"PREVIEW_DIR": preview_dir, "generate_video_previews": fake_generate_video_previews},
+            ):
+                previews = app.source_previews_for_analysis(signature, {"duration": "1"}, lambda _percent, _message: None)
+
+        self.assertEqual(len(previews), app.source_previews_for_analysis.__globals__["SOURCE_PREVIEW_COUNT"])
+
     def test_frame_preview_reuses_fresh_existing_thumbnail(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
             folder = Path(tmp_text)
