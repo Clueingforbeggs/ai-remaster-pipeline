@@ -478,7 +478,7 @@ def video_metrics(source: Path) -> dict[str, float]:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=avg_frame_rate,r_frame_rate,nb_frames,duration",
+            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration",
             "-show_entries",
             "format=duration",
             "-of",
@@ -494,10 +494,12 @@ def video_metrics(source: Path) -> dict[str, float]:
                 fps = parse_rate(stream.get("avg_frame_rate") or stream.get("r_frame_rate")) or 24.0
                 duration = float(stream.get("duration") or fmt.get("duration") or 0)
                 frames = int(str(stream.get("nb_frames") or "0").replace(",", "") or "0")
+                width = int(stream.get("width") or 0)
+                height = int(stream.get("height") or 0)
                 if frames <= 0 and duration > 0:
                     frames = int(round(duration * fps))
                 if frames > 0:
-                    return {"fps": fps, "frames": float(frames), "duration": duration or frames / fps}
+                    return {"fps": fps, "frames": float(frames), "duration": duration or frames / fps, "width": width, "height": height}
             except (ValueError, TypeError, json.JSONDecodeError, IndexError):
                 pass
     try:
@@ -508,8 +510,10 @@ def video_metrics(source: Path) -> dict[str, float]:
             return {}
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
         frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         cap.release()
-        return {"fps": fps, "frames": float(frames), "duration": frames / fps if frames and fps else 0.0}
+        return {"fps": fps, "frames": float(frames), "duration": frames / fps if frames and fps else 0.0, "width": width, "height": height}
     except Exception:
         return {}
 

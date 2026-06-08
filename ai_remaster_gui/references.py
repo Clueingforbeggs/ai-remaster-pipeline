@@ -13,6 +13,10 @@ from .media import extract_video_frame_at
 from .paths import rel, resolve, safe_stem
 from .sam_masks import sam2_mask_for_image
 
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import artifact_ids as aid  # noqa: E402
+
 
 def bind_context(context: dict) -> None:
     globals().update(context)
@@ -22,7 +26,8 @@ def recomposition_output_for(outpainted_text: str) -> str:
     if not outpainted_text:
         return ""
     outpainted = resolve(outpainted_text)
-    return rel(ROOT / "output" / "reassembled" / f"{safe_stem(outpainted.name)}_final.mp4")
+    ident = aid.recomp_identity(outpainted.stem)
+    return rel(ROOT / "output" / "reassembled" / aid.artifact_name(aid.source_word(outpainted.name), "recomp", ident, "mp4"))
 
 def colorized_outputs_for_manifest(manifest_text: str, method: str = "deepexemplar") -> list[str]:
     if method == "both":
@@ -35,16 +40,11 @@ def colorized_output_for_manifest(manifest_text: str, method: str = "deepexempla
         return ""
     if method == "both":
         return ""
-    suffix = "colormnet" if method == "colormnet" else "deepexemplar"
     manifest = resolve(manifest_text)
+    ident = aid.colorized_identity(manifest.stem, method)
     source_video = manifest_source_video(manifest)
-    if source_video:
-        source = resolve(source_video)
-        return rel(ROOT / "intermediate" / "outpainted_colorized" / f"{safe_stem(source.name)}_{suffix}_colorized.mp4")
-    if manifest_text:
-        stem = safe_stem(Path(manifest_text).stem.replace("colorize_manifest_", "").replace("_shots_auto", ""))
-        return rel(ROOT / "intermediate" / "outpainted_colorized" / f"{stem}_{suffix}_colorized.mp4")
-    return ""
+    name_src = resolve(source_video).name if source_video else manifest.name
+    return rel(ROOT / "intermediate" / "outpainted_colorized" / aid.artifact_name(aid.source_word(name_src), "color", ident, "mp4"))
 
 def color_reference_outputs(manifest_text: str) -> list[str]:
     if not manifest_text:

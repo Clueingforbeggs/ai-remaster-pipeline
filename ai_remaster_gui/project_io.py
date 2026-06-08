@@ -6,12 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import IMAGE_EXTS, ROOT, VIDEO_EXTS
-from .manifests import read_manifest
+from .manifests import read_manifest, read_outpaint_chunk_rows
 from .paths import resolve, resolve_video_source, safe_stem
 from .runtime_settings import load_settings
 
 PROJECT_SCHEMA_VERSION = 2
 PROJECT_JSON_NAME = "project.json"
+
+# Extensions allowed inside a project bundle. .json is included so outpaint guide sidecars
+# (resume signatures, edit metadata) travel with the guides and aren't treated as stale on load.
+BUNDLE_EXTS = IMAGE_EXTS | {".csv", ".txt", ".json"}
 
 
 def bind_context(context: dict) -> None:
@@ -106,12 +110,79 @@ def project_asset_paths(settings: dict[str, dict[str, str]]) -> list[Path]:
                 if project_asset_is_bundleable(image) and image not in seen:
                     seen.add(image)
                     assets.append(image)
+    # Outpaint chunk manifests and the hand-edited guide frames they reference, so a project
+    # keeps the user's manual guide work for safekeeping.
+    for asset in outpaint_guide_asset_paths(settings):
+        if asset not in seen:
+            seen.add(asset)
+            assets.append(asset)
+    return assets
+
+def chunk_guide_image_texts(manifest: Path) -> list[str]:
+    """Guide image paths referenced by a chunk manifest's rows (the active guide per frame plus
+    one undo step), covering both hand-edited guides (outpaint_guides/) and auto seed guides
+    (outpaint_seed_guides/). Mirrors outpaint_guides._parse_guide_frames, including the legacy
+    guide_image / guide_end_image fields, without importing that module."""
+    texts: list[str] = []
+    try:
+        rows = read_outpaint_chunk_rows(manifest)
+    except Exception:
+        return texts
+    for row in rows.values():
+        frames: list = []
+        raw = (row.get("guide_frames") or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    frames = parsed
+            except (json.JSONDecodeError, TypeError):
+                frames = []
+        for legacy in ("guide_image", "guide_end_image"):
+            if row.get(legacy):
+                frames.append({"image": row[legacy]})
+        for frame in frames:
+            if not isinstance(frame, dict):
+                continue
+            for key in ("image", "image_previous"):
+                value = frame.get(key)
+                if value:
+                    texts.append(str(value))
+    return texts
+
+def outpaint_guide_asset_paths(settings: dict[str, dict[str, str]]) -> list[Path]:
+    # The outpaint chunk manifest is identity-keyed now (e.g. Metropolis_chunks_<key>.csv), so
+    # locate it precisely via the same GUI helper that names it, rather than by stem prefix
+    # (which also avoids bundling other sections of the same film). These helpers are injected
+    # from server.py via bind_context.
+    chunk_manifest_for = globals().get("outpaint_chunk_manifest_for")
+    pipeline_source = globals().get("pipeline_source_text")
+    if not chunk_manifest_for or not pipeline_source:
+        return []
+    try:
+        manifest_text = chunk_manifest_for(pipeline_source(settings), settings.get("outpaint", {}))
+    except Exception:
+        return []
+    manifest = resolve(manifest_text) if manifest_text else None
+    if not manifest or not project_asset_is_bundleable(manifest):
+        return []
+    assets: list[Path] = [manifest]
+    seen: set[Path] = {manifest}
+    for image_text in chunk_guide_image_texts(manifest):
+        image = resolve(image_text)
+        # Bundle the guide image and its resume/edit sidecars so reloaded guides are used
+        # as-is and not treated as stale.
+        for candidate in (image, Path(str(image) + ".sig.json"), Path(str(image) + ".json")):
+            if candidate not in seen and project_asset_is_bundleable(candidate):
+                seen.add(candidate)
+                assets.append(candidate)
+        seen.add(image)
     return assets
 
 def project_asset_is_bundleable(path: Path) -> bool:
     if not path.exists() or not path.is_file():
         return False
-    if path.suffix.lower() not in IMAGE_EXTS | {".csv", ".txt"}:
+    if path.suffix.lower() not in BUNDLE_EXTS:
         return False
     try:
         path.resolve().relative_to(ROOT.resolve())
@@ -124,16 +195,21 @@ def extract_project_assets(archive: zipfile.ZipFile) -> None:
         name = info.filename.replace("\\", "/")
         if name == PROJECT_JSON_NAME or name.startswith("/") or ".." in Path(name).parts:
             continue
-        if Path(name).suffix.lower() not in IMAGE_EXTS | {".csv", ".txt"}:
+        if Path(name).suffix.lower() not in BUNDLE_EXTS:
             continue
         target = ROOT / name
         try:
             target.resolve().relative_to(ROOT.resolve())
         except ValueError:
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with archive.open(info) as source, target.open("wb") as dest:
-            dest.write(source.read())
+        # Restore each asset independently so one failure (e.g. a Windows MAX_PATH limit on a
+        # deeply nested guide-edit file) can't abort restoring the rest of the project.
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info) as source, target.open("wb") as dest:
+                dest.write(source.read())
+        except OSError as exc:
+            print(f"Warning: could not restore project asset {name}: {exc}", flush=True)
 
 def project_default_path(settings: dict[str, dict[str, str]]) -> Path:
     source = resolve_video_source(settings.get("global", {}).get("source", ""))

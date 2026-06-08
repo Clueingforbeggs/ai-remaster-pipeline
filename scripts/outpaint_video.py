@@ -30,6 +30,14 @@ from dependency_manager import ensure_outpaint_models
 from prepare_outpaint_input import default_output as default_prepared_output
 from prepare_outpaint_input import even, parse_aspect, probe_video
 from qwen_seed_guides import DEFAULT_SEED_PROMPT, seed_guides
+import artifact_ids as aid
+
+
+def _crop_black(args: Any | None) -> tuple[list[int], bool]:
+    if args is None:
+        return [0, 0, 0, 0], False
+    crop = [int(getattr(args, key, 0) or 0) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
+    return crop, bool(getattr(args, "outpaint_all_black_regions", False))
 
 
 DEFAULT_WORKFLOW = ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json"
@@ -51,22 +59,19 @@ def aspect_slug(value: str) -> str:
 
 
 def target_size(source: Path, aspect: str, target_height: int | None) -> tuple[int, int]:
-    info = probe_video(source)
-    height = even(target_height or 720)
-    width = even(height * parse_aspect(aspect))
-    return width, height
+    # Delivery resolution from the (already-resolved) target height. Centralised in artifact_ids
+    # so the GUI's outpaint_size_for_source and this stay identical.
+    height = int(target_height or 720)
+    return aid.delivery_size(height, aspect, str(height))
 
 
 def model_safe(value: int, multiple: int = MODEL_SIZE_MULTIPLE) -> int:
-    value = max(multiple, int(value))
-    lower = max(multiple, (value // multiple) * multiple)
-    upper = lower if lower == value else lower + multiple
-    return lower if value - lower <= upper - value else upper
+    return aid.model_safe(value, multiple)
 
 
 def model_safe_size(source: Path, aspect: str, target_height: int | None) -> tuple[int, int]:
-    width, height = target_size(source, aspect, target_height)
-    return model_safe(width), model_safe(height)
+    height = int(target_height or 720)
+    return aid.work_size(height, aspect, str(height))
 
 
 def crop_slug(args: Any) -> str:
@@ -78,12 +83,14 @@ def crop_slug(args: Any) -> str:
 
 def default_output(source: Path, aspect: str, target_height: int | None, args: Any | None = None) -> Path:
     width, height = model_safe_size(source, aspect, target_height)
-    return ROOT / "intermediate" / "outpainted" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{crop_slug(args) if args else ''}_outpainted.mp4"
+    crop, black = _crop_black(args)
+    return ROOT / "intermediate" / "outpainted" / aid.outpaint_name(source.name, aspect, width, height, crop, black, "outpaint", "mp4")
 
 
 def default_raw_output(source: Path, aspect: str, target_height: int | None, args: Any | None = None) -> Path:
     width, height = model_safe_size(source, aspect, target_height)
-    return ROOT / "intermediate" / "outpainted" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{crop_slug(args) if args else ''}_raw_comfy.mp4"
+    crop, black = _crop_black(args)
+    return ROOT / "intermediate" / "outpainted" / aid.outpaint_name(source.name, aspect, width, height, crop, black, "rawcomfy", "mp4")
 
 
 def prepared_for(source: Path, aspect: str, target_height: int | None, args: Any | None = None) -> Path:
@@ -92,9 +99,8 @@ def prepared_for(source: Path, aspect: str, target_height: int | None, args: Any
     # silently remove rows/columns of pixels.  Recomposition later upscales from model-safe
     # dimensions (e.g. 704) to delivery resolution (e.g. 720) when producing the final master.
     work_w, work_h = model_safe_size(source, aspect, target_height)
-    del_w, del_h = target_size(source, aspect, target_height)
-    prepared = default_prepared_output(source, work_w, work_h, del_w, del_h)
-    return prepared.with_name(prepared.stem + (crop_slug(args) if args else "") + prepared.suffix)
+    crop, black = _crop_black(args)
+    return ROOT / "intermediate" / "outpaint_prepared" / aid.outpaint_name(source.name, aspect, work_w, work_h, crop, black, "prepared", "mp4")
 
 
 def run_command(command: list[str], dry_run: bool) -> None:

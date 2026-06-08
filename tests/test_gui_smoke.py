@@ -39,6 +39,9 @@ from ai_remaster_gui import server
 class GuiSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._settings = copy.deepcopy(app.APP.settings)
+        # Default the soundtrack phase off so stage-order / upscale-chaining tests are not
+        # affected by whatever add_soundtrack happens to be in the loaded settings.
+        app.APP.settings.setdefault("global", {})["add_soundtrack"] = "false"
 
     def tearDown(self) -> None:
         app.APP.settings = self._settings
@@ -66,7 +69,13 @@ class GuiSmokeTests(unittest.TestCase):
 
         output = app.outpaint_output_for("input/My Source.mp4", "16:9", "720")
 
-        self.assertEqual(output, "intermediate/outpainted/My_Source_16x9_1280x704_outpainted.mp4")
+        # Identity-keyed short name: <sourceword>_<tag>_<key>.mp4 under intermediate/outpainted/.
+        self.assertTrue(output.startswith("intermediate/outpainted/My_outpaint_"), output)
+        self.assertTrue(output.endswith(".mp4"))
+        # The GUI locator and the producer script must name the file identically (no drift).
+        args = argparse.Namespace(crop_left=0, crop_right=0, crop_top=0, crop_bottom=0, outpaint_all_black_regions=False)
+        producer = outpaint_video.default_output(app.resolve_video_source("input/My Source.mp4"), "16:9", 720, args)
+        self.assertEqual(Path(output).name, producer.name)
 
     def test_outpaint_ltx_working_paths_use_model_safe_size(self) -> None:
         app.APP.settings.setdefault("outpaint", {}).update(
@@ -83,9 +92,18 @@ class GuiSmokeTests(unittest.TestCase):
         prepared = app.outpaint_prepared_for("input/My Source.mp4", app.APP.settings["outpaint"])
         manifest = app.outpaint_chunk_manifest_for("input/My Source.mp4", app.APP.settings["outpaint"])
 
-        self.assertEqual(prepared.name, "My Source_1280x704_from1280x720_lifted.mp4")
-        self.assertTrue(manifest.endswith("My_Source_16x9_1280x704_chunks.csv"))
-        self.assertEqual(app.outpaint_output_for("input/My Source.mp4", "16:9", "720"), "intermediate/outpainted/My_Source_16x9_1280x704_outpainted.mp4")
+        self.assertEqual(prepared.parent.name, "outpaint_prepared")
+        self.assertTrue(prepared.name.startswith("My_prepared_"), prepared.name)
+        self.assertTrue(manifest.startswith("manifests/outpaint_chunks/My_chunks_"), manifest)
+        self.assertTrue(manifest.endswith(".csv"))
+        # GUI and producer must agree on the prepared-canvas and outpaint output names.
+        args = argparse.Namespace(crop_left=0, crop_right=0, crop_top=0, crop_bottom=0, outpaint_all_black_regions=False)
+        source = app.resolve_video_source("input/My Source.mp4")
+        self.assertEqual(prepared.name, outpaint_video.prepared_for(source, "16:9", 720, args).name)
+        self.assertEqual(
+            Path(app.outpaint_output_for("input/My Source.mp4", "16:9", "720")).name,
+            outpaint_video.default_output(source, "16:9", 720, args).name,
+        )
 
     def test_source_height_outpaint_option_uses_video_height(self) -> None:
         app.APP.settings.setdefault("outpaint", {}).update(
@@ -98,8 +116,15 @@ class GuiSmokeTests(unittest.TestCase):
         )
         with mock.patch.object(server, "video_metrics", return_value={"height": 480}):
             output = app.outpaint_output_for("input/My Source.mp4", "16:9", "source")
+        output_720 = app.outpaint_output_for("input/My Source.mp4", "16:9", "720")
 
-        self.assertEqual(output, "intermediate/outpainted/My_Source_16x9_854x480_outpainted.mp4")
+        self.assertTrue(output.startswith("intermediate/outpainted/My_outpaint_"), output)
+        # "Source height" (480 -> work 864x480) must differ from a fixed 720 (-> 1280x704).
+        self.assertNotEqual(output, output_720)
+        # Agrees with the producer at the resolved height (480).
+        args = argparse.Namespace(crop_left=0, crop_right=0, crop_top=0, crop_bottom=0, outpaint_all_black_regions=False)
+        producer = outpaint_video.default_output(app.resolve_video_source("input/My Source.mp4"), "16:9", 480, args)
+        self.assertEqual(Path(output).name, producer.name)
 
     def test_outpaint_source_crop_preserves_original_source_scale(self) -> None:
         args = argparse.Namespace(
@@ -155,12 +180,17 @@ class GuiSmokeTests(unittest.TestCase):
         )
         app.APP.settings["global"].update({"source": "input/My Source.mp4", "section_start": "0", "section_end": ""})
 
-        output = app.outpaint_output_for("input/My Source.mp4", "16:9", "720")
-        prepared = app.outpaint_prepared_for("input/My Source.mp4", app.APP.settings["outpaint"])
+        output_black = app.outpaint_output_for("input/My Source.mp4", "16:9", "720")
+        prepared_black = app.outpaint_prepared_for("input/My Source.mp4", app.APP.settings["outpaint"])
         command = app.APP.command_for("outpaint")
+        # The all-black variant must be a distinct artifact from the protected-blacks variant.
+        app.APP.settings["outpaint"]["outpaint_all_black_regions"] = "false"
+        output_plain = app.outpaint_output_for("input/My Source.mp4", "16:9", "720")
+        app.APP.settings["outpaint"]["outpaint_all_black_regions"] = "true"
 
-        self.assertIn("_allblack_outpainted.mp4", output)
-        self.assertTrue(prepared.name.endswith("_allblack.mp4"))
+        self.assertTrue(output_black.startswith("intermediate/outpainted/My_outpaint_"), output_black)
+        self.assertNotEqual(output_black, output_plain)
+        self.assertTrue(prepared_black.name.startswith("My_prepared_"), prepared_black.name)
         self.assertIn("--outpaint-all-black-regions", command)
 
     def test_portable_comfy_parent_resolves_to_inner_checkout(self) -> None:
@@ -1302,8 +1332,11 @@ class GuiSmokeTests(unittest.TestCase):
         outputs = app.colorized_outputs_for_manifest("manifests/references/colorize_manifest_demo_shots_auto.csv", "both")
 
         self.assertEqual(len(outputs), 2)
-        self.assertTrue(outputs[0].endswith("_deepexemplar_colorized.mp4"))
-        self.assertTrue(outputs[1].endswith("_colormnet_colorized.mp4"))
+        # deepexemplar and colormnet are distinct identity-keyed artifacts.
+        self.assertNotEqual(outputs[0], outputs[1])
+        for output in outputs:
+            self.assertTrue(output.startswith("intermediate/outpainted_colorized/"), output)
+            self.assertTrue(output.endswith(".mp4"))
 
     def test_colorization_command_can_request_both_methods(self) -> None:
         app.APP.settings["colour"].update({"manifest": "manifests/references/colorize_manifest_demo_shots_auto.csv", "method": "both"})
@@ -1572,7 +1605,11 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertTrue(ok, message)
         self.assertEqual(app.APP.settings["upscale"]["preview_source"], app.rel(clip))
-        self.assertEqual(app.APP.settings["upscale"]["preview_output"], "output/upscaled/previews/clip_flashvsr_1920x1080_preview_6s.mp4")
+        self.assertEqual(
+            app.APP.settings["upscale"]["preview_output"],
+            app.upscale_preview_output_for(app.rel(clip), app.APP.settings["upscale"]),
+        )
+        self.assertTrue(app.APP.settings["upscale"]["preview_output"].startswith("output/upscaled/previews/clip_upscalepreview_"))
 
     def test_upscale_only_ignores_stale_recomposition_input(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
@@ -1590,7 +1627,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertIn("--input", command)
         self.assertEqual(command[command.index("--input") + 1], "input/example.mp4")
-        self.assertEqual(command[command.index("--output") + 1], "output/upscaled/example_flashvsr_1920x1080.mp4")
+        self.assertEqual(command[command.index("--output") + 1], app.upscale_output_for("input/example.mp4", app.APP.settings["upscale"]))
         self.assertNotIn("--method", command)
 
     def test_upscale_ignores_stale_backend_method_setting(self) -> None:
@@ -1602,7 +1639,7 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertNotIn("--method", command)
         self.assertNotIn("--realbasicvsr-repo", command)
         self.assertIn("--comfy-url", command)
-        self.assertEqual(command[command.index("--output") + 1], "output/upscaled/example_flashvsr_1920x1080.mp4")
+        self.assertEqual(command[command.index("--output") + 1], app.upscale_output_for("input/example.mp4", app.APP.settings["upscale"]))
 
     def test_flashvsr_prompt_uses_video_helper_load_and_combine_nodes(self) -> None:
         args = argparse.Namespace(

@@ -187,6 +187,12 @@ from .media import (
 
 MODEL_SIZE_MULTIPLE = 32
 
+# Shared artifact identity/naming/sizing (single source of truth, also imported by the producer
+# scripts). Lives under scripts/, so put that on the path before importing.
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+import artifact_ids as aid  # noqa: E402
+
 
 def combine_outpaint_prompt(prompt: str, suffix: str) -> str:
     base = (prompt or "").strip()
@@ -227,6 +233,11 @@ def source_workflow_defaults(info: dict[str, str], monochrome: bool | None = Non
         global_defaults["upscale"] = "true" if needs_upscale else "false"
         if squareish:
             stage_defaults.setdefault("outpaint", {})["target_aspect"] = "16:9"
+        # Outpaint at the source's native height when it is smaller than the 720 dropdown
+        # default, so a low-res source (e.g. 480p) is not silently upscaled during the
+        # (expensive) outpaint pass. The dedicated Upscale phase handles resolution increases.
+        if height < 720:
+            stage_defaults.setdefault("outpaint", {})["target_height"] = "source"
         if needs_upscale:
             stage_defaults.setdefault("upscale", {}).update({"target_width": "1920", "target_height": "1080"})
     # Default the soundtrack phase on only when the source has no audio track (a silent film).
@@ -345,9 +356,9 @@ class PipelineApp:
     def stage_file_prefixes(self, stage_key: str) -> tuple[str, ...]:
         source = self.settings.get("global", {}).get("source", "")
         if stage_key == "outpaint" and source:
-            stem = safe_stem(resolve(source).name)
-            values = self.settings.get("outpaint", {})
-            return (stem,)
+            # Outpaint artifacts are now named <sourceword>_<tag>_<key>.<ext>, so scope the
+            # Outpainting tab's file list to the source's first word.
+            return (aid.source_word(resolve(source).name),)
         return ()
 
     def stage_file_matches(self, stage_key: str, path: Path, prefixes: tuple[str, ...]) -> bool:
@@ -1621,27 +1632,30 @@ APP = PipelineApp()
 
 
 
+def _outpaint_crop_black(values: dict[str, str]) -> tuple[list[int], bool]:
+    crop = [int(float(values.get(key, "0") or 0)) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
+    black = values.get("outpaint_all_black_regions", "false") == "true"
+    return crop, black
+
+
 def manifest_for_outpainted(outpainted_text: str) -> str:
     if not outpainted_text:
         return ""
-    source = resolve(outpainted_text)
-    stem = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in source.name.replace(" ", "_"))
-    return rel(ROOT / "manifests" / "references" / f"colorize_manifest_{Path(stem).stem}_shots_auto.csv")
+    outpainted = resolve(outpainted_text)
+    ident = aid.shots_identity(outpainted.stem)
+    return rel(ROOT / "manifests" / "references" / aid.artifact_name(aid.source_word(outpainted.name), "shots", ident, "csv"))
 
 
 def outpaint_output_for(source_text: str, aspect: str, target_height_text: str = "720") -> str:
     if not source_text:
         return ""
     source = resolve_video_source(source_text)
-    if str(target_height_text or "").strip().lower() in {"source", "source height", "original"}:
-        width, height = outpaint_size_for_source(source_text, aspect, target_height_text)
-    else:
-        width, height = outpaint_work_size_for_source(source_text, aspect, target_height_text)
+    # Name via the shared identity (scripts/artifact_ids.py), the same call the producer
+    # (outpaint_video.default_output) makes, so the GUI and the script can never drift apart.
+    width, height = outpaint_work_size_for_source(source_text, aspect, target_height_text)
     values = APP.settings.get("outpaint", {}) if "APP" in globals() else {}
-    crops = [int(float(values.get(key, "0") or 0)) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
-    crop = "" if not any(crops) else f"_crop{crops[0]}-{crops[1]}-{crops[2]}-{crops[3]}"
-    black_region = "_allblack" if values.get("outpaint_all_black_regions", "false") == "true" else ""
-    return rel(ROOT / "intermediate" / "outpainted" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{crop}{black_region}_outpainted.mp4")
+    crop, black = _outpaint_crop_black(values)
+    return rel(ROOT / "intermediate" / "outpainted" / aid.outpaint_name(source.name, aspect, width, height, crop, black, "outpaint", "mp4"))
 
 
 def upscale_target_size(values: dict[str, str]) -> tuple[int, int]:
@@ -1661,21 +1675,18 @@ def upscale_output_for(source_text: str, values: dict[str, str]) -> str:
         return ""
     source = resolve(source_text)
     width, height = upscale_target_size(values)
-    method = "flashvsr"
-    return rel(ROOT / "output" / "upscaled" / f"{safe_stem(source.name)}_{method}_{width}x{height}.mp4")
+    ident = aid.upscale_identity(source.stem, width, height, "flashvsr")
+    return rel(ROOT / "output" / "upscaled" / aid.artifact_name(aid.source_word(source.name), "upscale", ident, "mp4"))
 
 
 def soundtrack_output_for(source_text: str, values: dict[str, str]) -> str:
     if not source_text:
         return ""
     source = resolve(source_text)
-    tags = []
-    if values.get("create_music", "true") == "true":
-        tags.append("music")
-    if values.get("create_sfx", "true") == "true":
-        tags.append("sfx")
-    tag = "_".join(tags) or "audio"
-    return rel(ROOT / "output" / "with_soundtrack" / f"{safe_stem(source.name)}_{tag}.mp4")
+    music = values.get("create_music", "true") == "true"
+    sfx = values.get("create_sfx", "true") == "true"
+    ident = aid.soundtrack_identity(source.stem, music, sfx)
+    return rel(ROOT / "output" / "with_soundtrack" / aid.artifact_name(aid.source_word(source.name), "audio", ident, "mp4"))
 
 
 def upscale_preview_output_for(source_text: str, values: dict[str, str]) -> str:
@@ -1683,9 +1694,9 @@ def upscale_preview_output_for(source_text: str, values: dict[str, str]) -> str:
         return ""
     source = resolve(source_text)
     width, height = upscale_target_size(values)
-    method = "flashvsr"
-    seconds = safe_stem(str(values.get("preview_seconds", "6") or "6"))
-    return rel(ROOT / "output" / "upscaled" / "previews" / f"{safe_stem(source.name)}_{method}_{width}x{height}_preview_{seconds}s.mp4")
+    seconds = str(values.get("preview_seconds", "6") or "6")
+    ident = aid.upscale_preview_identity(source.stem, width, height, "flashvsr", seconds)
+    return rel(ROOT / "output" / "upscaled" / "previews" / aid.artifact_name(aid.source_word(source.name), "upscalepreview", ident, "mp4"))
 
 
 def source_duration_text(source: Path) -> str:
@@ -1713,30 +1724,17 @@ def source_video_height(source_text: str) -> int:
         return 720
 
 
+# Size math is centralised in scripts/artifact_ids.py so the GUI and the producer scripts agree.
 def resolved_outpaint_height(source_text: str, target_height_text: str = "720") -> int:
-    if str(target_height_text or "").strip().lower() in {"source", "source height", "original"}:
-        return source_video_height(source_text)
-    try:
-        return even_int(int(float(target_height_text or "720")))
-    except ValueError:
-        return 720
+    return aid.resolved_height(source_video_height(source_text), target_height_text)
 
 
 def outpaint_size_for_source(source_text: str, aspect: str, target_height_text: str = "720") -> tuple[int, int]:
-    height = resolved_outpaint_height(source_text, target_height_text)
-    return even_int(height * parse_aspect(aspect)), height
-
-
-def model_safe_int(value: int, multiple: int = MODEL_SIZE_MULTIPLE) -> int:
-    value = max(multiple, int(value))
-    lower = max(multiple, (value // multiple) * multiple)
-    upper = lower if lower == value else lower + multiple
-    return lower if value - lower <= upper - value else upper
+    return aid.delivery_size(source_video_height(source_text), aspect, target_height_text)
 
 
 def outpaint_work_size_for_source(source_text: str, aspect: str, target_height_text: str = "720") -> tuple[int, int]:
-    width, height = outpaint_size_for_source(source_text, aspect, target_height_text)
-    return model_safe_int(width), model_safe_int(height)
+    return aid.work_size(source_video_height(source_text), aspect, target_height_text)
 
 
 def outpaint_crop_slug(values: dict[str, str]) -> str:
@@ -1752,7 +1750,8 @@ def outpaint_chunk_dir_for(source_text: str, values: dict[str, str]) -> Path:
     source = resolve_video_source(source_text)
     aspect = values.get("target_aspect", "16:9")
     width, height = outpaint_work_size_for_source(source_text, aspect, values.get("target_height", "720"))
-    return ROOT / ".cache" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}{outpaint_black_region_slug(values)}"
+    crop, black = _outpaint_crop_black(values)
+    return ROOT / ".cache" / "outpaint_chunks" / aid.outpaint_basename(source.name, aspect, width, height, crop, black, "chunks")
 
 
 def outpaint_chunk_manifest_for(source_text: str, values: dict[str, str]) -> str:
@@ -1761,7 +1760,8 @@ def outpaint_chunk_manifest_for(source_text: str, values: dict[str, str]) -> str
     source = resolve_video_source(source_text)
     aspect = values.get("target_aspect", "16:9")
     width, height = outpaint_work_size_for_source(source_text, aspect, values.get("target_height", "720"))
-    return rel(ROOT / "manifests" / "outpaint_chunks" / f"{safe_stem(source.name)}_{aspect_slug(aspect)}_{width}x{height}{outpaint_crop_slug(values)}{outpaint_black_region_slug(values)}_chunks.csv")
+    crop, black = _outpaint_crop_black(values)
+    return rel(ROOT / "manifests" / "outpaint_chunks" / aid.outpaint_name(source.name, aspect, width, height, crop, black, "chunks", "csv"))
 
 
 def outpaint_chunk_offset_slug(row: dict[str, str]) -> str:
@@ -1778,10 +1778,8 @@ def outpaint_prepared_for(source_text: str, values: dict[str, str]) -> Path:
     aspect = values.get("target_aspect", "16:9")
     height_text = values.get("target_height", "720")
     work_w, work_h = outpaint_work_size_for_source(source_text, aspect, height_text)
-    del_w, del_h = outpaint_size_for_source(source_text, aspect, height_text)
-    delivery_tag = f"_from{del_w}x{del_h}" if (del_w != work_w or del_h != work_h) else ""
-    mode_tag = "_allblack" if values.get("outpaint_all_black_regions", "false") == "true" else "_lifted"
-    return ROOT / "intermediate" / "outpaint_prepared" / f"{source.stem}_{work_w}x{work_h}{delivery_tag}{outpaint_crop_slug(values)}{mode_tag}.mp4"
+    crop, black = _outpaint_crop_black(values)
+    return ROOT / "intermediate" / "outpaint_prepared" / aid.outpaint_name(source.name, aspect, work_w, work_h, crop, black, "prepared", "mp4")
 
 
 def ensure_outpaint_prepared_canvas(source_text: str, values: dict[str, str]) -> Path:
