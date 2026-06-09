@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import comfy_api  # noqa: E402
+import audio_models  # noqa: E402
 import colorize_video  # noqa: E402
 import generate_single_reference  # noqa: E402
 import guide_frame_utils  # noqa: E402
@@ -952,6 +953,55 @@ class GuiSmokeTests(unittest.TestCase):
                     {"LTXVImgToVideoConditionOnly": "ComfyUI-LTXVideo", "UnetLoaderGGUF": "ComfyUI-GGUF"},
                     "outpainting workflow",
                 )
+
+    def test_mmaudio_graph_selects_distinct_model_files(self) -> None:
+        model_files = [
+            "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors",
+            "mmaudio_large_44k_v2_fp16.safetensors",
+            "mmaudio_synchformer_fp16.safetensors",
+            "mmaudio_vae_44k_fp16.safetensors",
+        ]
+        info = {
+            "MMAudioModelLoader": {
+                "input": {
+                    "required": {
+                        "mmaudio_model": (model_files, {}),
+                        "base_precision": (["fp16", "fp32"], {"default": "fp16"}),
+                    },
+                },
+            },
+            "MMAudioFeatureUtilsLoader": {
+                "input": {
+                    "required": {
+                        "vae_model": (model_files, {}),
+                        "synchformer_model": (model_files, {}),
+                        "clip_model": (model_files, {}),
+                    },
+                    "optional": {
+                        "mode": (["16k", "44k"], {"default": "44k"}),
+                        "precision": (["fp16", "fp32"], {"default": "fp16"}),
+                    },
+                },
+            },
+            "MMAudioSampler": {"input": {"required": {"images": ("IMAGE",)}}},
+        }
+
+        graph = audio_models.sfx_prompt_graph(
+            info,
+            video_name="proxy.mp4",
+            prompt="machinery",
+            negative="music",
+            seconds=8,
+            steps=25,
+            cfg=4.5,
+            seed=42,
+            prefix="arp_audio_sfx/test",
+        )
+
+        self.assertEqual(graph["1"]["inputs"]["mmaudio_model"], "mmaudio_large_44k_v2_fp16.safetensors")
+        self.assertEqual(graph["2"]["inputs"]["vae_model"], "mmaudio_vae_44k_fp16.safetensors")
+        self.assertEqual(graph["2"]["inputs"]["synchformer_model"], "mmaudio_synchformer_fp16.safetensors")
+        self.assertEqual(graph["2"]["inputs"]["clip_model"], "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors")
 
     def test_source_section_names_include_trim_points(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "12", "section_end": "24"})

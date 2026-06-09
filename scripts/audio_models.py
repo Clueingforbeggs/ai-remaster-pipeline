@@ -56,6 +56,23 @@ def default_from_spec(spec: Any) -> Any:
     return None
 
 
+def combo_values(spec: Any) -> list[str]:
+    if isinstance(spec, (list, tuple)) and spec and isinstance(spec[0], list):
+        return [str(value) for value in spec[0]]
+    return []
+
+
+def choose_combo_value(spec: Any, *needles: str) -> str | None:
+    values = combo_values(spec)
+    lowered = [(value, value.lower()) for value in values]
+    for needle in needles:
+        needle = needle.lower()
+        for value, lower in lowered:
+            if needle in lower:
+                return value
+    return None
+
+
 def spec_type(spec: Any) -> Any:
     if isinstance(spec, (list, tuple)) and spec:
         return spec[0]
@@ -79,6 +96,32 @@ def node_defaults(info: dict[str, Any], class_type: str, skip: set[str] = frozen
         if value is not None:
             out[name] = value
     return out
+
+
+def mmaudio_model_inputs(info: dict[str, Any]) -> dict[str, Any]:
+    inputs = node_defaults(info, MMAUDIO_MODEL_LOADER)
+    group = node_input_groups(info, MMAUDIO_MODEL_LOADER)
+    if "mmaudio_model" in group:
+        model = choose_combo_value(group["mmaudio_model"], "mmaudio_large", "mmaudio_medium", "mmaudio_small", "mmaudio")
+        if model:
+            inputs["mmaudio_model"] = model
+    return inputs
+
+
+def mmaudio_feature_inputs(info: dict[str, Any]) -> dict[str, Any]:
+    inputs = node_defaults(info, MMAUDIO_FEATURE_LOADER)
+    group = node_input_groups(info, MMAUDIO_FEATURE_LOADER)
+    model_hints = {
+        "vae_model": ("mmaudio_vae", "_vae", "vae"),
+        "synchformer_model": ("synchformer",),
+        "clip_model": ("clip", "dfn"),
+    }
+    for name, needles in model_hints.items():
+        if name in group:
+            value = choose_combo_value(group[name], *needles)
+            if value:
+                inputs[name] = value
+    return inputs
 
 
 def extract_audio_files(history_entry: dict[str, Any], output_root: Path) -> list[Path]:
@@ -216,8 +259,8 @@ def sfx_prompt_graph(
     seed: int,
     prefix: str,
 ) -> dict[str, Any]:
-    model_inputs = node_defaults(info, MMAUDIO_MODEL_LOADER)
-    feature_inputs = node_defaults(info, MMAUDIO_FEATURE_LOADER)
+    model_inputs = mmaudio_model_inputs(info)
+    feature_inputs = mmaudio_feature_inputs(info)
     sampler_inputs = node_defaults(
         info,
         MMAUDIO_SAMPLER,
