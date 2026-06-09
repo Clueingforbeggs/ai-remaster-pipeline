@@ -322,6 +322,27 @@ def bypass_demo_padding_node(workflow: dict[str, Any]) -> None:
         pass
 
 
+def bypass_conditioning_resize_nodes(workflow: dict[str, Any]) -> None:
+    """Keep LTX conditioning on full-size model-safe images.
+
+    ARP already copies guide images to the prepared canvas size. The workflow's
+    demo resize branch halves the prepared source and rounds it back to a multiple of
+    32, which can crop/zoom 864x480 or 1280x704 conditioning images. The i2v start
+    guide should see the still guide image, while IC-LoRA must keep following the
+    prepared video frames rather than the still guide.
+    """
+    try:
+        patch_link(workflow, 13600, 2004, 0, 3336, 0, "IMAGE")
+        set_input_link(workflow, "3336", "image", 13600)
+    except KeyError:
+        pass
+    try:
+        patch_link(workflow, 13589, 5060, 0, 5012, 4, "IMAGE")
+        set_input_link(workflow, "5012", "image", 13589)
+    except KeyError:
+        pass
+
+
 # The LTX example workflow is a frontend graph with stable-but-opaque node IDs.
 # Keep ARP's edits explicit here so model/backend assumptions remain auditable.
 def patch_lightweight_gguf(workflow: dict[str, Any], args) -> None:
@@ -601,8 +622,10 @@ def patch_workflow(args, workflow: dict[str, Any], prepared: Path, comfy_dir: Pa
             except KeyError:
                 pass
 
-    # ARP prepares the black target canvas itself, so the workflow's demo padding node is unnecessary.
+    # ARP prepares the black target canvas and guide images itself, so workflow demo resize/pad
+    # nodes must not reinterpret guide geometry.
     bypass_demo_padding_node(workflow)
+    bypass_conditioning_resize_nodes(workflow)
 
     # Extra guide frames via LTXVAddGuideAdvanced — inserted after GGUF patching so the VAE
     # source is already resolved.  Each guide is chained off the previous one.
@@ -616,7 +639,7 @@ def raw_signature(args, workflow_path: Path, prepared: Path, seed: int | None = 
     prompt_text = combine_prompt(args.prompt, prompt_suffix)
     negative_text = combine_prompt(args.negative_prompt, negative_suffix)
     return {
-        "version": 24,
+        "version": 27,
         "tool": "outpaint_video.py/raw_comfy",
         "prepared": root_relative(prepared),
         "prepared_fingerprint": file_fingerprint(prepared),
@@ -835,12 +858,44 @@ def sync_chunk_manifest(path: Path, ranges: list[tuple[int, int, int]], fps: flo
     return {int(row["chunk_index"]): row for row in rows}
 
 
+def _guide_frames_from_row(row: dict[str, str]) -> list[dict]:
+    raw = (row.get("guide_frames", "") or "").strip()
+    if raw:
+        try:
+            frames = json.loads(raw)
+            if isinstance(frames, list):
+                return [frame for frame in frames if isinstance(frame, dict)]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    frames: list[dict] = []
+    if row.get("guide_image"):
+        frames.append({"frame_idx": 0, "image": row["guide_image"], "strength": row.get("guide_strength", "0.7")})
+    if row.get("guide_end_image"):
+        frames.append({"frame_idx": -1, "image": row["guide_end_image"], "strength": row.get("guide_end_strength", "1.0")})
+    return frames
+
+
+def _occupied_guide_frame_idxs(rows: dict[int, dict[str, str]]) -> dict[int, set[int]]:
+    occupied: dict[int, set[int]] = {}
+    for chunk_index, row in rows.items():
+        for guide in _guide_frames_from_row(row):
+            if not guide.get("image"):
+                continue
+            try:
+                occupied.setdefault(chunk_index, set()).add(int(guide.get("frame_idx", 0)))
+            except (TypeError, ValueError):
+                continue
+    return occupied
+
+
 def apply_qwen_seed_guides(args, prepared: Path, ranges: list[tuple[int, int, int]], chunk_manifest: Path) -> dict[int, dict[str, str]]:
     """Generate Qwen guide frames at shot changes and merge them into the chunk manifest.
 
-    Existing user-authored guides are preserved; previously-seeded guides (marked seed=True)
-    are refreshed. Returns the updated chunk overrides so the render loop sees the new guides.
+    Existing guide images are preserved, including previous seed guides and user edits.
+    Seed generation only fills missing shot-boundary positions.
     """
+    rows = read_chunk_manifest(chunk_manifest)
+    occupied = _occupied_guide_frame_idxs(rows)
     comfy_output_root = resolve_path(args.comfy_output_root) if args.comfy_output_root else resolve_path(args.comfy_dir) / "output"
     qwen_args = {
         "workflow": args.qwen_workflow,
@@ -862,23 +917,15 @@ def apply_qwen_seed_guides(args, prepared: Path, ranges: list[tuple[int, int, in
         min_shot_seconds=args.seed_min_shot_seconds,
         start_strength=getattr(args, "guide_strength", 0.7),
         force=args.force,
+        occupied_frame_idxs=occupied,
     )
-    rows = read_chunk_manifest(chunk_manifest)
     for chunk_index, guides in seeded.items():
         row = rows.get(chunk_index)
         if row is None:
             continue
-        raw = (row.get("guide_frames", "") or "").strip()
-        try:
-            existing = json.loads(raw) if raw else []
-            if not isinstance(existing, list):
-                existing = []
-        except (json.JSONDecodeError, ValueError):
-            existing = []
-        # Keep user guides; drop stale seeded ones; don't collide with a user frame_idx.
-        kept = [g for g in existing if not (isinstance(g, dict) and g.get("seed"))]
-        user_frame_idxs = {int(g.get("frame_idx", 0)) for g in kept if isinstance(g, dict)}
-        merged = kept + [g for g in guides if int(g.get("frame_idx", 0)) not in user_frame_idxs]
+        existing = _guide_frames_from_row(row)
+        existing_frame_idxs = {int(g.get("frame_idx", 0)) for g in existing if isinstance(g, dict) and g.get("image")}
+        merged = existing + [g for g in guides if int(g.get("frame_idx", 0)) not in existing_frame_idxs]
         merged.sort(key=lambda g: int(g.get("frame_idx", 0)))
         row["guide_frames"] = json.dumps(merged)
         rows[chunk_index] = row

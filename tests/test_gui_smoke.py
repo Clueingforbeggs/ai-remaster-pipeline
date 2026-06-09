@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import comfy_api  # noqa: E402
 import colorize_video  # noqa: E402
 import generate_single_reference  # noqa: E402
+import guide_frame_utils  # noqa: E402
 import edit_reference_image  # noqa: E402
 import openai_generate_reference  # noqa: E402
 import outpaint_video  # noqa: E402
@@ -54,6 +55,37 @@ class GuiSmokeTests(unittest.TestCase):
             typed = folder / "King Kong Scene Pack | King Kong [0JgMh4I2UjY].mp4"
 
             self.assertEqual(app.resolve_video_source(str(typed)), real)
+
+    def test_run_all_waits_for_stage_hydration_before_next_stage(self) -> None:
+        class DoneProcess:
+            returncode = 0
+
+            def poll(self):
+                return 0
+
+        stages = [stage for stage in app.STAGES if stage.key in {"outpaint", "shots"}]
+        seen: list[tuple[str, str]] = []
+
+        def fake_run_stage(stage_key: str) -> tuple[bool, str]:
+            seen.append((stage_key, app.APP.settings.get("shots", {}).get("outpainted_video", "")))
+            app.APP.process = DoneProcess()
+            app.APP.running_stage_key = stage_key
+            if stage_key == "outpaint":
+                def finish_hydration() -> None:
+                    time.sleep(0.1)
+                    app.APP.settings.setdefault("shots", {})["outpainted_video"] = "intermediate/outpainted/movie.mp4"
+                    app.APP.running_stage_key = ""
+
+                threading.Thread(target=finish_hydration).start()
+            else:
+                app.APP.running_stage_key = ""
+            return True, "started"
+
+        with mock.patch.object(app.APP, "active_stages", return_value=tuple(stages)), mock.patch.object(app.APP, "run_stage", side_effect=fake_run_stage):
+            app.APP._run_all_worker()
+
+        self.assertEqual([key for key, _ in seen], ["outpaint", "shots"])
+        self.assertEqual(seen[1][1], "intermediate/outpainted/movie.mp4")
 
     def test_deterministic_outpaint_output_path_uses_selected_source(self) -> None:
         app.APP.settings.setdefault("outpaint", {}).update(
@@ -304,6 +336,76 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(prompt["2483"]["inputs"]["text"], "outpaint with natural film grain. continue the wallpaper")
         self.assertEqual(prompt["5012"]["inputs"]["positive"], ["1241", 0])
         self.assertEqual(prompt["1241"]["inputs"]["positive"], ["2483", 0])
+
+    def test_outpaint_conditioning_bypasses_resize_without_replacing_video_control(self) -> None:
+        workflow = json.loads((app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json").read_text(encoding="utf-8-sig"))
+        args = outpaint_video.build_parser().parse_args(["--source", "input/example.mp4", "--comfy-dir", str(app.ROOT), "--dry-run"])
+
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            guide = Path(tmp_text) / "guide.png"
+            guide.write_bytes(b"guide")
+            with (
+                mock.patch.object(outpaint_video, "copy_to_comfy_input", return_value="arp_outpaint/prepared.mp4"),
+                mock.patch.object(outpaint_video, "copy_guide_image_to_comfy_input", return_value="arp_outpaint/guide_864x480.png"),
+                mock.patch.object(outpaint_video, "probe_video", return_value={"width": 864, "height": 480, "frames": 24, "fps": 24.0}),
+            ):
+                prompt = outpaint_video.patch_workflow(
+                    args,
+                    workflow,
+                    app.ROOT / "prepared.mp4",
+                    app.ROOT,
+                    "arp_outpaint/test",
+                    args.prompt,
+                    args.negative_prompt,
+                    42,
+                    guide,
+                )
+
+        self.assertEqual(prompt["3336"]["inputs"]["image"], ["2004", 0])
+        self.assertEqual(prompt["5012"]["inputs"]["image"], ["5060", 0])
+        self.assertEqual(prompt["2004"]["inputs"]["image"], "arp_outpaint/guide_864x480.png")
+
+    def test_qwen_seed_guides_do_not_overwrite_existing_set_guides(self) -> None:
+        args = argparse.Namespace(
+            comfy_output_root="",
+            comfy_dir=str(app.ROOT),
+            qwen_workflow="workflow.json",
+            qwen_masked_workflow="masked.json",
+            comfy_url="http://127.0.0.1:8188",
+            qwen_model_backend="gguf",
+            qwen_gguf_model="model.gguf",
+            qwen_prompt="Replace the black bars.",
+            qwen_load_image_node_id="auto",
+            qwen_save_node_id="auto",
+            seed_sample_seconds=0.0,
+            seed_shot_threshold=None,
+            seed_min_shot_seconds=None,
+            guide_strength=0.7,
+            force=False,
+        )
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            guide = folder / "existing.png"
+            guide.write_bytes(b"guide")
+            existing = [{"frame_idx": 0, "strength": 0.7, "image": app.rel(guide), "seed": True}]
+            outpaint_video.write_chunk_manifest(
+                manifest,
+                [
+                    {
+                        "chunk_index": "0",
+                        "start_frame": "0",
+                        "end_frame": "24",
+                        "guide_frames": json.dumps(existing),
+                    }
+                ],
+            )
+
+            with mock.patch.object(outpaint_video, "seed_guides", return_value={}) as seed_mock:
+                rows = outpaint_video.apply_qwen_seed_guides(args, folder / "prepared.mp4", [(0, 0, 24)], manifest)
+
+        self.assertEqual(json.loads(rows[0]["guide_frames"]), existing)
+        self.assertEqual(seed_mock.call_args.kwargs["occupied_frame_idxs"], {0: {0}})
 
     def test_outpaint_command_uses_global_prompt(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "0", "section_end": ""})
@@ -1177,7 +1279,7 @@ class GuiSmokeTests(unittest.TestCase):
                     "end_frame": "24",
                     "start_seconds": "0",
                     "end_seconds": "1",
-                    "guide_frames": json.dumps([{"frame_idx": 0, "strength": 0.7, "image": app.rel(guide)}]),
+                    "guide_frames": json.dumps([{"frame_idx": 0, "strength": 0.7, "image": app.rel(guide), "seed": True}]),
                 }
             ]
             app.write_outpaint_chunk_rows(manifest, rows)
@@ -1242,6 +1344,33 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn("edit_reference_image.py", " ".join(command))
         self.assertEqual(command[command.index("--instruction") + 1], "Replace the black bars.")
         self.assertIn("--mask", command)
+
+    def test_auto_edge_mask_uses_sloppy_feathered_boundary(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "pillarbox.png"
+            mask_path = folder / "mask.png"
+            image = Image.new("RGB", (96, 48), (0, 0, 0))
+            for y in range(48):
+                for x in range(24, 72):
+                    image.putpixel((x, y), (64, 64, 64))
+            image.save(source)
+
+            guide_frame_utils.save_edge_mask_for_image(source, mask_path)
+
+            with Image.open(mask_path) as mask:
+                pixels = mask.convert("L").load()
+                left_edges = []
+                for y in range(mask.height):
+                    xs = [x for x in range(mask.width // 2) if pixels[x, y] > 0]
+                    left_edges.append(max(xs))
+
+                self.assertEqual(pixels[0, mask.height // 2], 255)
+                self.assertEqual(pixels[mask.width // 2, mask.height // 2], 0)
+                self.assertGreater(len(set(left_edges)), 4)
+                self.assertTrue(any(0 < pixels[x, mask.height // 2] < 255 for x in range(mask.width // 2)))
 
     def test_masked_edit_uses_bundled_workflow_when_setting_is_empty(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
@@ -1328,6 +1457,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(accepted["image"], app.rel(edit))
         self.assertEqual(accepted_frame["image_previous"], app.rel(guide))
+        self.assertNotIn("seed", accepted_frame)
         self.assertEqual(reverted["image"], app.rel(guide))
         self.assertEqual(reverted_frame["image_previous"], app.rel(edit))
 

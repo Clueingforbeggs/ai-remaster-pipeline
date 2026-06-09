@@ -142,6 +142,7 @@ def seed_guides(
     start_strength: float = 0.7,
     mid_strength: float = 1.0,
     force: bool = False,
+    occupied_frame_idxs: dict[int, set[int]] | None = None,
 ) -> dict[int, list[dict]]:
     """Generate Qwen seed guides at every shot change and map them to chunks.
 
@@ -160,6 +161,9 @@ def seed_guides(
             for boundary in boundaries:
                 if not (start <= boundary < end):
                     continue
+                frame_idx = boundary - start
+                if occupied_frame_idxs and int(frame_idx) in occupied_frame_idxs.get(chunk_index, set()):
+                    continue
                 if boundary not in cache:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, int(boundary))
                     ok, frame = cap.read()
@@ -171,7 +175,6 @@ def seed_guides(
                 guide_path = cache[boundary]
                 if guide_path is None:
                     continue
-                frame_idx = boundary - start
                 result.setdefault(chunk_index, []).append({
                     "frame_idx": int(frame_idx),
                     "strength": float(start_strength if frame_idx == 0 else mid_strength),

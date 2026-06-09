@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import random
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +41,50 @@ def _edge_bbox_from_rgb_pixels(width: int, height: int, get_pixel, threshold: in
     return min(xs), max(xs), min(ys), max(ys)
 
 
-DEFAULT_EDGE_MASK_OVERLAP_PX = 6
+DEFAULT_EDGE_MASK_OVERLAP_PX = 10
+DEFAULT_EDGE_MASK_FEATHER_PX = 10
+DEFAULT_EDGE_MASK_WOBBLE_PX = 12
 
 
-def _save_edge_mask(width: int, height: int, bbox: tuple[int, int, int, int] | None, target: Path, overlap_px: int = DEFAULT_EDGE_MASK_OVERLAP_PX) -> Path:
+def _mask_seed(width: int, height: int, bbox: tuple[int, int, int, int] | None, target: Path) -> int:
+    text = f"{width}x{height}|{bbox}|{target.as_posix()}"
+    return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _smooth_wobble(length: int, amplitude: int, rng: random.Random) -> list[int]:
+    if length <= 0 or amplitude <= 0:
+        return [0] * max(0, length)
+    step = 18
+    controls = max(3, (length + step - 1) // step + 2)
+    values = [rng.randint(-amplitude, amplitude) for _ in range(controls)]
+    wobble: list[int] = []
+    for i in range(length):
+        pos = i / step
+        left = min(controls - 2, int(pos))
+        frac = pos - left
+        value = values[left] * (1.0 - frac) + values[left + 1] * frac
+        value += rng.uniform(-amplitude * 0.18, amplitude * 0.18)
+        wobble.append(int(round(value)))
+    return wobble
+
+
+def _edge_opacity(distance_inside: int, feather_px: int) -> int:
+    if distance_inside <= 0:
+        return 0
+    if feather_px <= 0 or distance_inside >= feather_px:
+        return 255
+    return max(0, min(255, int(round(255 * distance_inside / feather_px))))
+
+
+def _save_edge_mask(
+    width: int,
+    height: int,
+    bbox: tuple[int, int, int, int] | None,
+    target: Path,
+    overlap_px: int = DEFAULT_EDGE_MASK_OVERLAP_PX,
+    feather_px: int = DEFAULT_EDGE_MASK_FEATHER_PX,
+    wobble_px: int = DEFAULT_EDGE_MASK_WOBBLE_PX,
+) -> Path:
     from PIL import Image as PILImage
 
     mask = PILImage.new("L", (width, height), 0)
@@ -63,16 +105,29 @@ def _save_edge_mask(width: int, height: int, bbox: tuple[int, int, int, int] | N
                     mask_pixels[x, y] = 255
         else:
             overlap = max(0, int(overlap_px))
+            feather = max(0, int(feather_px))
+            wobble = max(0, int(wobble_px))
+            rng = random.Random(_mask_seed(width, height, bbox, target))
+            left_wobble = _smooth_wobble(height, wobble, rng) if mask_left else []
+            right_wobble = _smooth_wobble(height, wobble, rng) if mask_right else []
+            top_wobble = _smooth_wobble(width, wobble, rng) if mask_top else []
+            bottom_wobble = _smooth_wobble(width, wobble, rng) if mask_bottom else []
             for y in range(height):
                 for x in range(width):
-                    edge = (
-                        (mask_left and x < min(width, left + overlap))
-                        or (mask_right and x > max(-1, right - overlap))
-                        or (mask_top and y < min(height, top + overlap))
-                        or (mask_bottom and y > max(-1, bottom - overlap))
-                    )
-                    if edge:
-                        mask_pixels[x, y] = 255
+                    opacity = 0
+                    if mask_left:
+                        boundary = max(left + 1, min(width, left + overlap + left_wobble[y]))
+                        opacity = max(opacity, _edge_opacity(boundary - x, feather))
+                    if mask_right:
+                        boundary = min(right - 1, max(-1, right - overlap + right_wobble[y]))
+                        opacity = max(opacity, _edge_opacity(x - boundary, feather))
+                    if mask_top:
+                        boundary = max(top + 1, min(height, top + overlap + top_wobble[x]))
+                        opacity = max(opacity, _edge_opacity(boundary - y, feather))
+                    if mask_bottom:
+                        boundary = min(bottom - 1, max(-1, bottom - overlap + bottom_wobble[x]))
+                        opacity = max(opacity, _edge_opacity(y - boundary, feather))
+                    mask_pixels[x, y] = opacity
     target.parent.mkdir(parents=True, exist_ok=True)
     mask.save(target, format="PNG")
     return target

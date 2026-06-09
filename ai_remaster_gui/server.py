@@ -1590,6 +1590,8 @@ class PipelineApp:
                 continue
             while self.process and self.process.poll() is None:
                 time.sleep(0.5)
+            while self.running_stage_key == stage.key:
+                time.sleep(0.05)
             if self.process and self.process.returncode:
                 break
 

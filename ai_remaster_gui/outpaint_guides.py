@@ -144,6 +144,7 @@ def guide_frame_generation_command(chunk_index: int, guide_index: int, frame_idx
         frames = _parse_guide_frames(stored[chunk_index])
         if 0 <= guide_index < len(frames):
             frames[guide_index]["image"] = rel(output)
+            frames[guide_index].pop("seed", None)
         else:
             frames.append({"frame_idx": frame_idx, "strength": 0.7, "image": rel(output)})
         stored[chunk_index]["guide_frames"] = json.dumps(frames)
@@ -423,6 +424,7 @@ def upload_guide_frame_image(chunk_index: int, guide_index: int) -> dict:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
     frames[guide_index]["image"] = rel(target)
+    frames[guide_index].pop("seed", None)
     _save_guide_frames(manifest, chunk_index, frames)
     APP.log.append(f"Uploaded guide frame {guide_index} for chunk {chunk_index + 1}: {rel(target)}")
     return {"selected": selected, "image": rel(target)}
@@ -604,6 +606,7 @@ def accept_guide_edit(chunk_index: int, guide_index: int, preview_path: str) -> 
     previous = frames[guide_index].get("image", "")
     frames[guide_index]["image_previous"] = previous
     frames[guide_index]["image"] = rel(preview)
+    frames[guide_index].pop("seed", None)
     _save_guide_frames(manifest, chunk_index, frames)
     APP.log.append(f"Accepted edited guide frame {guide_index + 1} for chunk {chunk_index + 1}: {rel(preview)}")
     return {"image": rel(preview), "previous": previous}
