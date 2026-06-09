@@ -540,6 +540,10 @@ def main_with_args(args: argparse.Namespace) -> int:
     print(f'Manifest: {manifest}')
     print(f'Rows: {len(rows)}')
     print(f'Qwen mode: {args.model_backend}; one source image only; extra references are converted to text guidance when enabled.')
+    rows_without_source = [row for row in rows if not row_source(row).strip()]
+    if rows_without_source:
+        print(f'Skipping {len(rows_without_source)} shot(s) with no guide frame (empty source_reference).')
+        rows = [row for row in rows if row_source(row).strip()]
     missing_sources = [resolve_path(row_source(row)) for row in rows if not resolve_path(row_source(row)).is_file()]
     if missing_sources:
         sample = ', '.join(str(path) for path in missing_sources[:3])
