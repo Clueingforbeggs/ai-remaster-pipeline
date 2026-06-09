@@ -862,6 +862,7 @@ Invoke-Step 'Install ComfyUI custom nodes' {
     Install-CustomNodePackage 'ComfyUI-GGUF' 'https://github.com/city96/ComfyUI-GGUF.git' (Join-Path $CustomNodes 'ComfyUI-GGUF') -UpdateExisting
     Install-CustomNodePackage 'ComfyUI-VideoHelperSuite' 'https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git' (Join-Path $CustomNodes 'ComfyUI-VideoHelperSuite') -UpdateExisting
     Install-CustomNodePackage 'ComfyUI-FlashVSR_Ultra_Fast' 'https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast.git' (Join-Path $CustomNodes 'ComfyUI-FlashVSR_Ultra_Fast') -UpdateExisting
+    Install-CustomNodePackage 'ComfyUI-MMAudio' 'https://github.com/kijai/ComfyUI-MMAudio.git' (Join-Path $CustomNodes 'ComfyUI-MMAudio') -UpdateExisting
     if (-not $SkipDeepExemplar) {
         Install-CustomNodePackage 'reference-video-colorization' 'https://github.com/jonstreeter/ComfyUI-Reference-Based-Video-Colorization.git' (Join-Path $CustomNodes 'reference-video-colorization') -UpdateExisting
     }
@@ -888,6 +889,11 @@ Invoke-Step 'Verify required ComfyUI custom nodes' {
         (Join-Path $CustomNodes 'ComfyUI-FlashVSR_Ultra_Fast') `
         'https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast' `
         @('FlashVSRNode')
+    Assert-CustomNodeSymbols `
+        'ComfyUI-MMAudio' `
+        (Join-Path $CustomNodes 'ComfyUI-MMAudio') `
+        'https://github.com/kijai/ComfyUI-MMAudio' `
+        @('MMAudioModelLoader', 'MMAudioFeatureUtilsLoader', 'MMAudioSampler')
     if (-not $SkipDeepExemplar) {
         Assert-CustomNodeSymbols `
             'ComfyUI-Reference-Based-Video-Colorization' `
@@ -902,6 +908,7 @@ Invoke-Step 'Install custom-node requirements' {
     Install-RequirementsIfPresent (Join-Path $CustomNodes 'ComfyUI-GGUF\requirements.txt')
     Install-RequirementsIfPresent (Join-Path $CustomNodes 'ComfyUI-VideoHelperSuite\requirements.txt')
     Install-RequirementsIfPresent (Join-Path $CustomNodes 'ComfyUI-FlashVSR_Ultra_Fast\requirements.txt')
+    Install-RequirementsIfPresent (Join-Path $CustomNodes 'ComfyUI-MMAudio\requirements.txt')
     if (-not $SkipDeepExemplar) {
         Install-RequirementsIfPresent (Join-Path $CustomNodes 'reference-video-colorization\requirements.txt')
         Install-Pip @('scikit-image', 'einops', 'tqdm', 'matplotlib')

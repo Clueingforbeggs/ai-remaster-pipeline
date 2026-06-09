@@ -30,6 +30,13 @@ Bundled node packs:
   - License: LTX-2 Community License Agreement.
   - Used for: `LTXVImgToVideoConditionOnly`, `LTXAddVideoICLoRAGuide`,
     `LTXVPreprocess`, and related LTX helpers.
+- `ComfyUI-MMAudio`
+  - Upstream: https://github.com/kijai/ComfyUI-MMAudio
+  - Source revision: `8eaeb72edc3aaf2059b57f2d96a1f6f689f19ae2`
+  - License: MIT
+  - Used for: `MMAudioModelLoader`, `MMAudioFeatureUtilsLoader`,
+    `MMAudioSampler`.
+  - Excludes: large checkpoint/model files.
 
 Before publishing a release, re-check upstream licenses and replace any
 non-redistributable package with installer-only download instructions.

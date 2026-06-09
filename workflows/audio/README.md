@@ -30,7 +30,7 @@ https://huggingface.co/stabilityai/stable-audio-open-1.0 and run `hf auth login`
 Override the filename on the Audio tab ("Stable Audio checkpoint") if yours differs.
 
 ### Sound effects — MMAudio (video → synchronized audio)
-Install the custom node (the only manual install for this phase):
+Installed by `install_windows.bat`:
 - `ComfyUI-MMAudio` → https://github.com/kijai/ComfyUI-MMAudio
   (provides `MMAudioModelLoader`, `MMAudioFeatureUtilsLoader`, `MMAudioSampler`)
 
