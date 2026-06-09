@@ -190,6 +190,13 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/stop":
             APP.stop()
             self.send_json({"ok": True})
+        elif parsed.path == "/api/quit":
+            # Kill any running stage, answer, then stop the server so the launching shell
+            # returns to its prompt with nothing left running. Answer before shutdown so
+            # this response still reaches the browser.
+            APP.stop_for_quit()
+            self.send_json({"ok": True})
+            request_quit(self.server)
         elif parsed.path == "/api/shot-scrub":
             try:
                 result = extract_reference_frame(str(data.get("manifest", "")), int(data.get("index", 0)), float(data.get("time", 0)))

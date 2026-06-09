@@ -140,6 +140,22 @@ def install_shutdown_handlers() -> None:
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), handle_signal)
 
+def request_quit(server: ThreadingHTTPServer) -> None:
+    """Stop the GUI server shortly after the current response is flushed.
+
+    serve_forever() runs on the main thread, so shutdown() has to come from another
+    thread; the brief delay lets the /api/quit response reach the browser before the
+    socket closes. main()'s finally block then runs server_close() and stops ComfyUI.
+    """
+    def _shutdown() -> None:
+        time.sleep(0.3)
+        try:
+            server.shutdown()
+        except Exception as exc:
+            print(f"Could not stop ARP cleanly: {exc}")
+
+    threading.Thread(target=_shutdown, daemon=True).start()
+
 def create_server(host: str, requested_port: int) -> ThreadingHTTPServer:
     ports = [requested_port, 0] if requested_port != 0 else [0]
     last_error: OSError | None = None

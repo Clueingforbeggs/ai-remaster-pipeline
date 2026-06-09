@@ -324,6 +324,18 @@ def build_sfx_stem(args: argparse.Namespace, ffmpeg: str, source: Path, duration
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 
+def ensure_music_checkpoint_file(comfy_dir: Path, checkpoint: str) -> None:
+    target = comfy_dir / "models" / "checkpoints" / checkpoint
+    if target.exists():
+        return
+    raise FileNotFoundError(
+        f"Stable Audio checkpoint is missing: {target}. "
+        "Open https://huggingface.co/stabilityai/stable-audio-open-1.0 in your browser, sign in, accept the gated licence, "
+        "authenticate with 'hf auth login' or HF_TOKEN, then retry so ARP can download it. "
+        "You can also place the downloaded model.safetensors at that path manually."
+    )
+
+
 def signature(args: argparse.Namespace, source: Path) -> dict[str, Any]:
     return {
         "version": 1,
@@ -371,7 +383,10 @@ def run(args: argparse.Namespace) -> int:
     print(f"Source video: {info['width']}x{info['height']}, {info['fps']:.4g} fps, {duration:.2f}s", flush=True)
 
     ffmpeg = find_ffmpeg(args.ffmpeg)
-    ensure_audio_models(resolve_path(args.comfy_dir), music=bool(args.music), sfx=bool(args.sfx))
+    comfy_dir = resolve_path(args.comfy_dir)
+    ensure_audio_models(comfy_dir, music=bool(args.music), sfx=bool(args.sfx))
+    if args.music:
+        ensure_music_checkpoint_file(comfy_dir, args.music_checkpoint)
     print("Waiting for ComfyUI", flush=True)
     wait_for_comfy(args.comfy_url, timeout_seconds=180, poll_seconds=args.poll_seconds)
 
@@ -409,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--music-cfg", type=float, default=6.0)
     parser.add_argument("--sfx-prompt", default="")
     parser.add_argument("--sfx-negative", default="music, song, singing, speech, voice")
-    parser.add_argument("--sfx-chunk-seconds", type=float, default=8.0)
+    parser.add_argument("--sfx-chunk-seconds", type=float, default=16.0)
     parser.add_argument("--sfx-short-side", type=int, default=384)
     parser.add_argument("--sfx-steps", type=int, default=25)
     parser.add_argument("--sfx-cfg", type=float, default=4.5)

@@ -39,7 +39,8 @@ Plus `ComfyUI-VideoHelperSuite` (already used by outpaint/upscale) for `VHS_Load
 The MMAudio weights (model + VAE + Synchformer + CLIP) auto-download into
 `ComfyUI/models/mmaudio/`. MMAudio analyses a low-resolution proxy — the short side is capped
 at **384px** by default, since higher resolution only increases processing time without
-improving the audio.
+improving the audio. The default SFX window is **16 seconds**, which is a reasonable starting
+point for a 24 GB GPU; reduce it if VRAM gets tight, or try 20-24 seconds if it runs comfortably.
 
 ### Captioning (optional, recommended) — local Qwen-VL
 The music score is mood-matched per scene using a local Qwen-VL caption node. Set the node's

@@ -119,7 +119,7 @@ STAGES = (
             ("music_checkpoint", "Stable Audio checkpoint", "text", "stable_audio_open_1.0.safetensors"),
             ("sfx_prompt", "Sound effects hint", "text", ""),
             ("sfx_negative_prompt", "Sound effects negative", "text", "music, song, singing, speech, voice"),
-            ("sfx_chunk_seconds", "SFX chunk seconds", "number", "8"),
+            ("sfx_chunk_seconds", "SFX chunk seconds", "number", "16"),
             ("sfx_short_side", "MMAudio analysis short side", "number", "384"),
             ("music_gain_db", "Music level (dB)", "number", "-9"),
             ("sfx_gain_db", "Sound effects level (dB)", "number", "0"),

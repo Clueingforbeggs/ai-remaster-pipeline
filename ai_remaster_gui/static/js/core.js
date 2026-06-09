@@ -4,6 +4,7 @@ let selected = {};
 let lastRenderSignature = '';
 let lastOutpaintVisualSignature = '';
 let lastSeenLogCount = null;
+let quitting = false;
 
 const media = path => '/media?path=' + encodeURIComponent(path);
 const mediaClip = (path, start, end, key) => (
@@ -23,6 +24,7 @@ async function api(path, opts = {}) {
 }
 
 async function refresh(force = false) {
+  if (quitting) return;
   const snap = captureScrollState();
   const editing = isEditingField();
   const mediaActive = hasMediaOnPage();

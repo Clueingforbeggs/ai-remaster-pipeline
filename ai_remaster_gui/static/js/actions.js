@@ -1207,6 +1207,43 @@ async function stopRun() {
   refresh(true);
 }
 
+async function quitArp() {
+  const global = (state && state.settings && state.settings.global) || {};
+  const hasProject = !!String(global.source || '').trim();
+
+  if (hasProject && confirm('Save the current project before quitting ARP?')) {
+    // OK = save first (may open a Save dialog for an unsaved project); Cancel = quit without saving.
+    const result = await postJson('/api/project-save', { save_as: false });
+    if (!result.ok) return alert(result.error || 'Could not save project. ARP is still running.');
+    if (!result.path) return; // Save dialog was cancelled — leave ARP running.
+    if (result.state) state = result.state;
+  } else if (!hasProject && !confirm('Quit ARP and close this page?')) {
+    return; // Nothing to save — confirm so a stray click does not stop the server.
+  }
+
+  quitting = true; // Stop the polling loop so it does not spam errors as the server goes away.
+  try {
+    await postJson('/api/quit', {});
+  } catch {
+    // The server closes its socket while shutting down; a dropped request here is expected.
+  }
+  showQuitScreen();
+  // Browsers only let scripts close windows they opened, so window.close() is often ignored;
+  // the quit screen tells the user they can close the tab themselves.
+  setTimeout(() => { try { window.close(); } catch {} }, 150);
+}
+
+function showQuitScreen() {
+  document.title = 'ARP has shut down';
+  document.body.innerHTML = `
+    <div class="quit-screen">
+      <img src="/media?path=assets/branding/arp-app-icon-192.png" alt="">
+      <h1>ARP has shut down</h1>
+      <p>You can close this browser tab now.</p>
+    </div>
+  `;
+}
+
 async function deleteCacheFile(path) {
   if (!confirm('Delete this cached file?\n\n' + path + '\n\nThis cannot be undone.')) return;
 

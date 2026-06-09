@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import comfy_api  # noqa: E402
 import audio_models  # noqa: E402
 import colorize_video  # noqa: E402
+import create_audio_track  # noqa: E402
 import generate_single_reference  # noqa: E402
 import guide_frame_utils  # noqa: E402
 import edit_reference_image  # noqa: E402
@@ -1002,6 +1003,99 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(graph["2"]["inputs"]["vae_model"], "mmaudio_vae_44k_fp16.safetensors")
         self.assertEqual(graph["2"]["inputs"]["synchformer_model"], "mmaudio_synchformer_fp16.safetensors")
         self.assertEqual(graph["2"]["inputs"]["clip_model"], "apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors")
+
+    def test_music_checkpoint_validation_reports_available_choices(self) -> None:
+        info = {
+            "CheckpointLoaderSimple": {
+                "input": {
+                    "required": {
+                        "ckpt_name": (["ltx-2.3-22b-dev-fp8.safetensors"], {}),
+                    },
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "stable_audio_open_1.0.safetensors"):
+            audio_models.ensure_checkpoint_choice(info, "stable_audio_open_1.0.safetensors")
+
+    def test_music_checkpoint_file_preflight_reports_gated_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            with self.assertRaisesRegex(FileNotFoundError, "stabilityai/stable-audio-open-1.0"):
+                create_audio_track.ensure_music_checkpoint_file(Path(tmp_text), "stable_audio_open_1.0.safetensors")
+
+    def test_audio_music_missing_checkpoint_opens_huggingface_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            source = Path(tmp_text) / "source.mp4"
+            comfy = Path(tmp_text) / "ComfyUI"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update(
+                {
+                    "source": str(source),
+                    "expand_outpaint": "false",
+                    "colorize": "false",
+                    "add_soundtrack": "true",
+                    "section_start": "0",
+                    "section_end": "",
+                }
+            )
+            app.APP.settings["audio"].update(
+                {
+                    "create_music": "true",
+                    "create_sfx": "false",
+                    "music_checkpoint": "stable_audio_open_1.0.safetensors",
+                }
+            )
+
+            with (
+                mock.patch.object(server, "current_config", return_value={"comfy_dir": str(comfy)}),
+                mock.patch.object(server, "ROOT", Path(tmp_text)),
+                mock.patch.object(server.webbrowser, "open", return_value=True) as open_browser,
+                mock.patch.object(server, "ensure_comfy_available_for_stage") as ensure_comfy,
+            ):
+                ok, message = app.APP.run_stage("audio")
+
+        self.assertFalse(ok)
+        self.assertIn("Hugging Face license acceptance", message)
+        open_browser.assert_called_once_with(server.STABLE_AUDIO_LICENSE_URL)
+        ensure_comfy.assert_not_called()
+
+    def test_audio_music_second_click_after_handoff_attempts_download(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            source = root / "source.mp4"
+            comfy = root / "ComfyUI"
+            source.write_bytes(b"placeholder")
+            app.APP.settings["global"].update(
+                {
+                    "source": str(source),
+                    "expand_outpaint": "false",
+                    "colorize": "false",
+                    "add_soundtrack": "true",
+                    "section_start": "0",
+                    "section_end": "",
+                }
+            )
+            app.APP.settings["audio"].update(
+                {
+                    "create_music": "true",
+                    "create_sfx": "false",
+                    "music_checkpoint": "stable_audio_open_1.0.safetensors",
+                }
+            )
+
+            with (
+                mock.patch.object(server, "current_config", return_value={"comfy_dir": str(comfy)}),
+                mock.patch.object(server, "ROOT", root),
+                mock.patch.object(server.webbrowser, "open", return_value=True) as open_browser,
+            ):
+                marker = server.stable_audio_handoff_marker_path("stable_audio_open_1.0.safetensors")
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("{}", encoding="utf-8")
+                ok, message = server.stable_audio_browser_handoff("stable_audio_open_1.0.safetensors")
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "")
+        open_browser.assert_not_called()
 
     def test_source_section_names_include_trim_points(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "12", "section_end": "24"})
@@ -2247,6 +2341,52 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertIn('/static/js/core.js', html)
         self.assertIn('/static/js/render-cache.js', html)
         self.assertIn('/static/js/app.js', html)
+
+    def test_quit_endpoint_acknowledges_and_stops_server(self) -> None:
+        server = app.create_server("127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/api/quit",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(payload["ok"])
+            # request_quit() shuts the server down a moment after answering.
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_quit_stops_running_stage_and_blocks_relaunch(self) -> None:
+        class FakeRunningProcess:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        previous_process = app.APP.process
+        previous_quitting = app.APP.quitting
+        app.APP.process = FakeRunningProcess()
+        app.APP.quitting = False
+        try:
+            with mock.patch.object(server, "terminate_process_tree") as kill:
+                app.APP.stop_for_quit()
+
+            kill.assert_called_once_with(app.APP.process)
+            self.assertTrue(app.APP.quitting)
+            # While quitting, a Run All queue (or any caller) must not relaunch a stage.
+            ok, message = app.APP.run_stage("outpaint")
+            self.assertFalse(ok)
+            self.assertIn("shutting down", message)
+        finally:
+            app.APP.process = previous_process
+            app.APP.quitting = previous_quitting
 
 
 if __name__ == "__main__":

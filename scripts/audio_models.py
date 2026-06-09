@@ -203,6 +203,21 @@ def music_prompt_graph(
     }
 
 
+def ensure_checkpoint_choice(info: dict[str, Any], checkpoint: str) -> None:
+    group = node_input_groups(info, MUSIC_CHECKPOINT_NODE)
+    choices = combo_values(group.get("ckpt_name"))
+    if not choices or checkpoint in choices:
+        return
+    available = ", ".join(choices) if choices else "none"
+    raise RuntimeError(
+        f"Stable Audio checkpoint '{checkpoint}' is not available in ComfyUI's checkpoint list. "
+        f"ComfyUI currently reports: {available}. "
+        f"Place the Stable Audio Open file at ComfyUI/models/checkpoints/{checkpoint}, then fully restart ComfyUI. "
+        f"If it is missing, accept the gated Hugging Face licence for stabilityai/stable-audio-open-1.0 "
+        f"and authenticate with 'hf auth login' or HF_TOKEN before retrying."
+    )
+
+
 def run_music_cue(
     comfy_url: str,
     comfy_output_root: Path,
@@ -228,6 +243,7 @@ def run_music_cue(
         "music score generation",
     )
     info = object_info(comfy_url)
+    ensure_checkpoint_choice(info, checkpoint)
     graph = music_prompt_graph(
         info,
         checkpoint=checkpoint,

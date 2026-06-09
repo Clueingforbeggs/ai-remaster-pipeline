@@ -16,11 +16,12 @@ function draw(followLogs = false) {
 // A plain setInterval would fire every 4s even when a state fetch is still in flight,
 // stacking overlapping requests (and their ffprobe work) and saturating the server.
 function scheduleNextRefresh() {
+  if (quitting) return;
   setTimeout(async () => {
     try {
       await refresh();
     } finally {
-      scheduleNextRefresh();
+      if (!quitting) scheduleNextRefresh();
     }
   }, 4000);
 }

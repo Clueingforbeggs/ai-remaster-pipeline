@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -109,6 +110,7 @@ from .lifecycle import (
     create_server,
     ensure_comfy_available_for_stage,
     install_shutdown_handlers,
+    request_quit,
     start_comfy_if_needed,
     stop_started_comfy,
     bind_context as bind_lifecycle_context,
@@ -188,12 +190,52 @@ from .media import (
 )
 
 MODEL_SIZE_MULTIPLE = 32
+STABLE_AUDIO_LICENSE_URL = "https://huggingface.co/stabilityai/stable-audio-open-1.0"
+STABLE_AUDIO_DEFAULT_CHECKPOINT = "stable_audio_open_1.0.safetensors"
 
 # Shared artifact identity/naming/sizing (single source of truth, also imported by the producer
 # scripts). Lives under scripts/, so put that on the path before importing.
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 import artifact_ids as aid  # noqa: E402
+
+
+def stable_audio_checkpoint_path(checkpoint: str) -> Path:
+    config = current_config()
+    comfy_dir = Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui")))
+    return comfy_dir / "models" / "checkpoints" / checkpoint
+
+
+def stable_audio_handoff_marker_path(checkpoint: str) -> Path:
+    digest = hashlib.sha1(checkpoint.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return ROOT / ".cache" / "handoffs" / f"stable_audio_{digest}.json"
+
+
+def stable_audio_browser_handoff(checkpoint: str) -> tuple[bool, str]:
+    target = stable_audio_checkpoint_path(checkpoint)
+    if target.exists():
+        return True, ""
+    marker = stable_audio_handoff_marker_path(checkpoint)
+    if marker.exists():
+        return True, ""
+    opened = False
+    if os.environ.get("AI_REMASTER_NO_BROWSER") != "1":
+        try:
+            opened = bool(webbrowser.open(STABLE_AUDIO_LICENSE_URL))
+        except Exception:
+            opened = False
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        json.dumps({"checkpoint": checkpoint, "url": STABLE_AUDIO_LICENSE_URL, "opened": opened}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    action = "Opened" if opened else "Open"
+    return False, (
+        f"Stable Audio needs a one-time Hugging Face license acceptance before music generation. "
+        f"{action} {STABLE_AUDIO_LICENSE_URL} in your browser, sign in, accept the license, then click Run Create Audio Track again. "
+        f"ARP will download the checkpoint to {target}. "
+        f"If the download still needs credentials after accepting, run 'hf auth login' or set HF_TOKEN."
+    )
 
 
 def combine_outpaint_prompt(prompt: str, suffix: str) -> str:
@@ -275,6 +317,7 @@ class PipelineApp:
         self.project_path: Path | None = None
         self.log: list[str] = []
         self.process: subprocess.Popen[str] | None = None
+        self.quitting = False
         self.running_stage = ""
         self.running_stage_key = ""
         self.running_reference_manifest = ""
@@ -1061,7 +1104,7 @@ class PipelineApp:
                 add(["--sfx-prompt", values.get("sfx_prompt", "")])
             if values.get("sfx_negative_prompt"):
                 add(["--sfx-negative", values.get("sfx_negative_prompt", "")])
-            add(["--sfx-chunk-seconds", values.get("sfx_chunk_seconds", "8")])
+            add(["--sfx-chunk-seconds", values.get("sfx_chunk_seconds", "16")])
             add(["--sfx-short-side", values.get("sfx_short_side", "384")])
             add(["--music-gain-db", values.get("music_gain_db", "-9")])
             add(["--sfx-gain-db", values.get("sfx_gain_db", "0")])
@@ -1081,6 +1124,8 @@ class PipelineApp:
         return [part for part in cmd if part != ""]
 
     def run_stage(self, stage_key: str) -> tuple[bool, str]:
+        if self.quitting:
+            return False, "ARP is shutting down."
         if stage_key == "outpaint" and not self.outpaint_enabled():
             return False, "Expand using Outpainting is disabled on the Overview tab."
         if stage_key in COLORIZE_STAGE_KEYS and not self.colorize_enabled():
@@ -1100,6 +1145,10 @@ class PipelineApp:
             source_text = self.soundtrack_source_for()
             if not source_text or not resolve(source_text).exists():
                 return False, "No finished video is available to add a soundtrack to yet. Run Recomposition first when earlier phases are enabled."
+            if audio_values.get("create_music", "true") == "true":
+                ok, message = stable_audio_browser_handoff(audio_values.get("music_checkpoint", STABLE_AUDIO_DEFAULT_CHECKPOINT))
+                if not ok:
+                    return False, message
         if stage_key == "upscale":
             self.hydrate_stage_inputs("upscale")
             if not self.upscale_input_for():
@@ -1621,6 +1670,13 @@ class PipelineApp:
             if self.process and self.process.poll() is None:
                 terminate_process_tree(self.process)
                 self.log.append("Stop requested.")
+
+    def stop_for_quit(self) -> None:
+        # Quitting: refuse new stages (so a Run All queue can't relaunch) and kill the
+        # one in flight, so nothing is left running and the launching shell gets its prompt back.
+        self.quitting = True
+        self.log.append("Quitting ARP.")
+        self.stop()
 
 
 APP = PipelineApp()
