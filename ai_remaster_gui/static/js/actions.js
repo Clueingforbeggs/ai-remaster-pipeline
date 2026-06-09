@@ -729,7 +729,7 @@ function updateShotPreview(manifest, index, time, imgId, labelId) {
       + '&time=' + encodeURIComponent(time);
     const result = await api('/api/shot-preview' + query);
     const img = document.getElementById(imgId);
-    if (result.ok && result.path && img) img.src = media(result.path) + '&t=' + Date.now();
+    if (result.ok && result.path && img) img.src = media(result.path);
   }, 180);
 }
 
@@ -748,7 +748,7 @@ function updateShotBoundaryPreview(manifest, index, time, imgId, labelId, datase
       + '&time=' + encodeURIComponent(previewTime);
     const result = await api('/api/shot-preview' + query);
     const img = document.getElementById(imgId);
-    if (result.ok && result.path && img) img.src = media(result.path) + '&t=' + Date.now();
+    if (result.ok && result.path && img) img.src = media(result.path);
   }, 120);
 }
 

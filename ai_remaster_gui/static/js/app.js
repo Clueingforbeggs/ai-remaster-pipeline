@@ -12,5 +12,18 @@ function draw(followLogs = false) {
   return drawStage(stage(active), followLogs);
 }
 
-setInterval(refresh, 4000);
+// Self-scheduling poll: wait for each refresh to finish before timing the next one.
+// A plain setInterval would fire every 4s even when a state fetch is still in flight,
+// stacking overlapping requests (and their ffprobe work) and saturating the server.
+function scheduleNextRefresh() {
+  setTimeout(async () => {
+    try {
+      await refresh();
+    } finally {
+      scheduleNextRefresh();
+    }
+  }, 4000);
+}
+
 refresh();
+scheduleNextRefresh();

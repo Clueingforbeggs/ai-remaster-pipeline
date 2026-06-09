@@ -241,15 +241,17 @@ function boundaryFrameCard({ manifest, row, idx }, edge) {
   const labelId = `shotBoundaryLabel_${edge}_${idx}`;
   const previewOffset = isStart ? 0 : -(1 / fps);
 
+  const step = (1 / Math.max(1, fps)).toFixed(6);
+
   return `
     <div>
       <label id="${labelId}">${label} frame ${frame ?? ''}</label>
-      ${preview ? `<img id="${imgId}" src="${media(preview)}&t=${Date.now()}" alt="">` : missingImage('Image not present')}
+      ${preview ? `<img id="${imgId}" src="${media(preview)}" alt="">` : missingImage('Image not present')}
       <input
         type="range"
         min="${min}"
         max="${max}"
-        step="0.041"
+        step="${step}"
         value="${value}"
         ${disabled}
         data-edge="${edge}"

@@ -375,6 +375,7 @@ async function selectTab(tab) {
   active = tab;
   drawTabs();
   if (tab === 'outpaint') showOutpaintLoadingShell();
+  else if (['shots', 'references', 'colour'].includes(tab)) showShotLoadingShell(tab);
   state = await api(stateUrl());
   pruneSelected();
   drawTabs();
@@ -393,6 +394,25 @@ function showOutpaintLoadingShell() {
       <div>
         <h2>Preparing Outpainting</h2>
         <p class="shot-empty">Checking chunk ranges and cached previews...</p>
+      </div>
+    </section>
+  `;
+}
+
+function showShotLoadingShell(tab) {
+  const app = document.getElementById('app');
+  if (!app) return;
+  const copy = {
+    shots: ['Loading Shot Detection', 'Reading the shot manifest and rendering boundary thumbnails...'],
+    references: ['Loading References', 'Reading the shot manifest and reference thumbnails...'],
+    colour: ['Loading Shot Segments', 'Reading the shot manifest and colour previews...'],
+  }[tab] || ['Loading', 'Reading the shot manifest...'];
+  app.innerHTML = `
+    <section class="card outpaint-loading">
+      <span class="spinner"></span>
+      <div>
+        <h2>${esc(copy[0])}</h2>
+        <p class="shot-empty">${esc(copy[1])}</p>
       </div>
     </section>
   `;

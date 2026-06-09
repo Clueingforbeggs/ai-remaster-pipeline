@@ -215,28 +215,28 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/shot-merge":
             try:
                 result = merge_manifest_shots(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": APP.state()})
+                self.send_json({"ok": True, **result, "state": APP.state("shots")})
             except Exception as exc:
                 APP.log.append(f"Shot merge failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/shot-split":
             try:
                 result = split_manifest_shot(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": APP.state()})
+                self.send_json({"ok": True, **result, "state": APP.state("shots")})
             except Exception as exc:
                 APP.log.append(f"Shot split failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/shot-boundary":
             try:
                 result = update_shot_boundary(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("edge", "")), float(data.get("time", 0)))
-                self.send_json({"ok": True, **result, "state": APP.state()})
+                self.send_json({"ok": True, **result, "state": APP.state("shots")})
             except Exception as exc:
                 APP.log.append(f"Shot boundary update failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/shot-fade":
             try:
                 result = update_shot_fade(str(data.get("manifest", "")), int(data.get("index", 0)), bool(data.get("enabled")), str(data.get("crossfade_seconds", "")))
-                self.send_json({"ok": True, **result, "state": APP.state()})
+                self.send_json({"ok": True, **result, "state": APP.state("shots")})
             except Exception as exc:
                 APP.log.append(f"Shot fade update failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})

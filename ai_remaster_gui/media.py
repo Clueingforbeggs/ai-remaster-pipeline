@@ -428,7 +428,23 @@ def ffprobe_basic_info(source: Path) -> dict[str, str]:
         return {"codec_note": "ffprobe returned invalid JSON."}
     return ffprobe_info_from_data(data)
 
+# ffprobe is slow to spawn (≈50-100ms each) and shot views probe the same source
+# dozens of times per state build. Cache successful probes by file identity so they
+# only re-run when the underlying file actually changes.
+_FFPROBE_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
+
+
 def ffprobe_info(source: Path) -> dict[str, str]:
+    cache_key: tuple[str, int, int] | None = None
+    try:
+        stat = source.stat()
+        cache_key = (str(source), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _FFPROBE_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
     found = local_tool("ffprobe")
     if not found:
         return {"codec_note": "Run install_windows.bat to install local FFmpeg/ffprobe for codec and colour metadata."}
@@ -449,7 +465,10 @@ def ffprobe_info(source: Path) -> dict[str, str]:
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
         return {"codec_note": "ffprobe returned invalid JSON."}
-    return ffprobe_info_from_data(data)
+    info = ffprobe_info_from_data(data)
+    if cache_key is not None:
+        _FFPROBE_CACHE[cache_key] = dict(info)
+    return info
 
 def ffprobe_info_from_data(data: dict) -> dict[str, str]:
     out: dict[str, str] = {}

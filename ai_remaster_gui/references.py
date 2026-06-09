@@ -73,6 +73,7 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
         return []
     path = resolve(manifest_text)
     rows = read_manifest(path)
+    fps = manifest_fps(path)
     out: list[dict[str, object]] = []
     start = 0.0
     for index, row in enumerate(rows):
@@ -84,8 +85,8 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
                 "enabled": row.get("enabled", "true"),
                 "start": round(start, 3),
                 "end": round(end, 3),
-                "start_frame": int(round(start * manifest_fps(path))),
-                "end_frame": max(0, int(round(end * manifest_fps(path))) - 1),
+                "start_frame": int(round(start * fps)),
+                "end_frame": max(0, int(round(end * fps)) - 1),
                 "duration": round(max(0.0, end - start), 3),
                 "selected_time": round(selected, 3),
                 "start_label": format_timecode(start),
@@ -107,7 +108,7 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
             }
         if include_previews:
             mid = (start + end) / 2 if end > start else start
-            for key, value in (("start_preview", start), ("middle_preview", mid), ("end_preview", max(start, end - (1 / max(1.0, manifest_fps(path)))))):
+            for key, value in (("start_preview", start), ("middle_preview", mid), ("end_preview", max(start, end - (1 / max(1.0, fps))))):
                 try:
                     item[key] = preview_reference_frame(manifest_text, index, value)
                 except Exception:
