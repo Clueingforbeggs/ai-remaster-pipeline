@@ -34,6 +34,8 @@ AUDIO_SUFFIXES = {".flac", ".wav", ".mp3", ".ogg", ".m4a"}
 # Node class names, overridable so a user can point at an equivalent node without code edits.
 MUSIC_CHECKPOINT_NODE = "CheckpointLoaderSimple"
 MUSIC_TEXT_ENCODE_NODE = "CLIPTextEncode"
+MUSIC_CLIP_LOADER_NODE = "CLIPLoader"
+MUSIC_CONDITIONING_NODE = "ConditioningStableAudio"
 MUSIC_EMPTY_LATENT_NODE = "EmptyLatentAudio"
 MUSIC_SAMPLER_NODE = "KSampler"
 MUSIC_VAE_DECODE_NODE = "VAEDecodeAudio"
@@ -166,6 +168,7 @@ def music_prompt_graph(
     info: dict[str, Any],
     *,
     checkpoint: str,
+    text_encoder: str,
     prompt: str,
     negative: str,
     seconds: float,
@@ -185,21 +188,31 @@ def music_prompt_graph(
     latent_defaults.setdefault("batch_size", 1)
     return {
         "1": {"class_type": MUSIC_CHECKPOINT_NODE, "inputs": {"ckpt_name": checkpoint}},
-        "2": {"class_type": MUSIC_TEXT_ENCODE_NODE, "inputs": {"text": prompt, "clip": ["1", 1]}},
-        "3": {"class_type": MUSIC_TEXT_ENCODE_NODE, "inputs": {"text": negative, "clip": ["1", 1]}},
-        "4": {"class_type": MUSIC_EMPTY_LATENT_NODE, "inputs": latent_defaults},
+        "2": {"class_type": MUSIC_CLIP_LOADER_NODE, "inputs": {"clip_name": text_encoder, "type": "stable_audio"}},
+        "3": {"class_type": MUSIC_TEXT_ENCODE_NODE, "inputs": {"text": prompt, "clip": ["2", 0]}},
+        "4": {"class_type": MUSIC_TEXT_ENCODE_NODE, "inputs": {"text": negative, "clip": ["2", 0]}},
         "5": {
+            "class_type": MUSIC_CONDITIONING_NODE,
+            "inputs": {
+                "positive": ["3", 0],
+                "negative": ["4", 0],
+                "seconds_start": 0.0,
+                "seconds_total": round(float(seconds), 3),
+            },
+        },
+        "6": {"class_type": MUSIC_EMPTY_LATENT_NODE, "inputs": latent_defaults},
+        "7": {
             "class_type": MUSIC_SAMPLER_NODE,
             "inputs": {
                 "model": ["1", 0],
-                "positive": ["2", 0],
-                "negative": ["3", 0],
-                "latent_image": ["4", 0],
+                "positive": ["5", 0],
+                "negative": ["5", 1],
+                "latent_image": ["6", 0],
                 **sampler_defaults,
             },
         },
-        "6": {"class_type": MUSIC_VAE_DECODE_NODE, "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
-        "7": {"class_type": SAVE_AUDIO_NODE, "inputs": {"audio": ["6", 0], "filename_prefix": prefix}},
+        "8": {"class_type": MUSIC_VAE_DECODE_NODE, "inputs": {"samples": ["7", 0], "vae": ["1", 2]}},
+        "9": {"class_type": SAVE_AUDIO_NODE, "inputs": {"audio": ["8", 0], "filename_prefix": prefix}},
     }
 
 
@@ -218,11 +231,25 @@ def ensure_checkpoint_choice(info: dict[str, Any], checkpoint: str) -> None:
     )
 
 
+def ensure_clip_choice(info: dict[str, Any], clip_name: str) -> None:
+    group = node_input_groups(info, MUSIC_CLIP_LOADER_NODE)
+    choices = combo_values(group.get("clip_name"))
+    if not choices or clip_name in choices:
+        return
+    available = ", ".join(choices) if choices else "none"
+    raise RuntimeError(
+        f"Stable Audio text encoder '{clip_name}' is not available in ComfyUI's text encoder list. "
+        f"ComfyUI currently reports: {available}. "
+        f"Place the T5-base text encoder at ComfyUI/models/text_encoders/{clip_name}, then fully restart ComfyUI."
+    )
+
+
 def run_music_cue(
     comfy_url: str,
     comfy_output_root: Path,
     *,
     checkpoint: str,
+    text_encoder: str,
     prompt: str,
     negative: str,
     seconds: float,
@@ -236,6 +263,8 @@ def run_music_cue(
         comfy_url,
         {
             MUSIC_CHECKPOINT_NODE: "ComfyUI (core)",
+            MUSIC_CLIP_LOADER_NODE: "ComfyUI (core)",
+            MUSIC_CONDITIONING_NODE: "ComfyUI (core, Stable Audio)",
             MUSIC_EMPTY_LATENT_NODE: "ComfyUI (core, Stable Audio)",
             MUSIC_VAE_DECODE_NODE: "ComfyUI (core, Stable Audio)",
             SAVE_AUDIO_NODE: "ComfyUI (core)",
@@ -244,9 +273,11 @@ def run_music_cue(
     )
     info = object_info(comfy_url)
     ensure_checkpoint_choice(info, checkpoint)
+    ensure_clip_choice(info, text_encoder)
     graph = music_prompt_graph(
         info,
         checkpoint=checkpoint,
+        text_encoder=text_encoder,
         prompt=prompt,
         negative=negative,
         seconds=seconds,

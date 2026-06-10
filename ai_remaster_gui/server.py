@@ -40,7 +40,7 @@ from .manifests import (
     write_outpaint_chunk_rows,
 )
 from .models import COLORIZE_STAGE_KEYS, STAGES, Stage, output_stage
-from .paths import even_int, newest, rel, resolve, resolve_video_source
+from .paths import even_int, newest, rel, resolve, resolve_video_source, safe_stem
 from .project_io import (
     last_browse_dir,
     project_default_path,
@@ -411,6 +411,29 @@ class PipelineApp:
         name = path.stem
         return any(name == prefix or name.startswith(prefix + "_") for prefix in prefixes)
 
+    def audio_stems_state(self) -> list[dict[str, str | int | bool]]:
+        source_text = self.soundtrack_source_for()
+        if not source_text:
+            return []
+        source = resolve(source_text)
+        work_dir = ROOT / ".cache" / "audio" / safe_stem(source.name)
+        stems = (
+            ("music", "Music stem", "music_stem.wav"),
+            ("sfx", "Sound effects stem", "sfx_stem.wav"),
+            ("mixed", "Mixed soundtrack", "mixed.wav"),
+        )
+        rows = []
+        for key, label, filename in stems:
+            path = work_dir / filename
+            exists = path.exists() and path.is_file()
+            size = path.stat().st_size if exists else 0
+            try:
+                path_text = path.resolve().relative_to(ROOT.resolve()).as_posix()
+            except ValueError:
+                path_text = str(path.resolve())
+            rows.append({"key": key, "label": label, "path": path_text, "exists": exists, "size": size})
+        return rows
+
     def progress(self) -> list[dict[str, str]]:
         rows = []
         for stage in self.active_stages():
@@ -634,6 +657,7 @@ class PipelineApp:
                 "aspect_preview": aspect_preview,
                 "outpaint_chunks": outpaint_chunks,
                 "shot_views": shots,
+                "audio_stems": self.audio_stems_state() if view == "audio" else [],
                 "cache": cache,
                 "system_status": system_status(),
                 "running": running,

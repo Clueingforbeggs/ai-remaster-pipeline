@@ -271,6 +271,7 @@ function drawStage(st) {
         <p>${st.description}</p>
         ${progressHtml(sp.percent, sp.label)}
         ${st.fields.map(f => fieldHtml(st, f)).join('')}
+        ${st.key === 'audio' ? audioStemLinksHtml() : ''}
         ${shotOutputList(expected, null)}
         ${stageCheckboxes(s)}
         <div class="actions">
@@ -294,6 +295,50 @@ function drawStage(st) {
 
   bindStageFields(st.key);
   showCommand(st.key);
+}
+
+function audioStemLinksHtml() {
+  const stems = state.audio_stems || [];
+  if (!stems.length) return '';
+  return `
+    <h3>Audio Stems</h3>
+    <div class="audio-stems">
+      ${stems.map(audioStemItem).join('')}
+    </div>
+  `;
+}
+
+function audioStemItem(stem) {
+  const exists = Boolean(stem.exists);
+  const path = stem.path || '';
+  const size = Number(stem.size || 0);
+  const sizeLabel = size ? ` (${formatBytes(size)})` : '';
+  const controls = exists ? `
+    <audio controls preload="none" src="${media(path)}"></audio>
+    <div class="audio-stem-actions">
+      <a class="button-like" href="${media(path)}" download>Download WAV</a>
+      <button class="icon-button inline" type="button" title="Save this stem as..." onclick="exportMedia(${jsArg(path)})">&#128190;</button>
+    </div>
+  ` : '<p>Not generated yet.</p>';
+  return `
+    <div class="layer-item audio-stem-item">
+      <span>${esc(stem.label || 'Audio stem')}${esc(sizeLabel)}</span>
+      <strong>${esc(path)}</strong>
+      ${controls}
+    </div>
+  `;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
 function stageCheckboxes(s) {

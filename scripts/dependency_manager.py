@@ -45,6 +45,7 @@ QWEN_IMAGE_EDIT_MODELS = [
 # continues instead of aborting the run.
 MUSIC_MODELS = [
     HfModel("stabilityai/stable-audio-open-1.0", "model.safetensors", "models/checkpoints/stable_audio_open_1.0.safetensors"),
+    HfModel("google-t5/t5-base", "model.safetensors", "models/text_encoders/t5_base.safetensors"),
 ]
 
 # Sound effects: MMAudio (video -> synchronized audio), kijai's ComfyUI-ready safetensors.

@@ -280,7 +280,8 @@ def build_music_stem(args: argparse.Namespace, ffmpeg: str, source: Path, durati
         print(f"Composing music cue {index + 1}/{len(scenes)} ({length:.1f}s)", flush=True)
         raw = audio_models.run_music_cue(
             args.comfy_url, resolve_path(args.comfy_output_root),
-            checkpoint=args.music_checkpoint, prompt=prompt, negative=args.music_negative,
+            checkpoint=args.music_checkpoint, text_encoder=args.music_text_encoder,
+            prompt=prompt, negative=args.music_negative,
             seconds=length + 1.0, steps=args.music_steps, cfg=args.music_cfg,
             seed=args.seed + index, prefix=f"arp_audio/music_{safe_stem(source.name)}_{index:04d}",
             poll_seconds=args.poll_seconds,
@@ -336,6 +337,17 @@ def ensure_music_checkpoint_file(comfy_dir: Path, checkpoint: str) -> None:
     )
 
 
+def ensure_music_text_encoder_file(comfy_dir: Path, text_encoder: str) -> None:
+    target = comfy_dir / "models" / "text_encoders" / text_encoder
+    if target.exists():
+        return
+    raise FileNotFoundError(
+        f"Stable Audio text encoder is missing: {target}. "
+        "ARP normally downloads this public T5-base file automatically from google-t5/t5-base. "
+        "Check network access and retry, or place google-t5/t5-base model.safetensors at that path manually."
+    )
+
+
 def signature(args: argparse.Namespace, source: Path) -> dict[str, Any]:
     return {
         "version": 1,
@@ -348,6 +360,7 @@ def signature(args: argparse.Namespace, source: Path) -> dict[str, Any]:
         "music_negative": args.music_negative,
         "music_cue_seconds": args.music_cue_seconds,
         "music_checkpoint": args.music_checkpoint,
+        "music_text_encoder": args.music_text_encoder,
         "music_steps": args.music_steps,
         "music_cfg": args.music_cfg,
         "sfx_prompt": args.sfx_prompt,
@@ -387,6 +400,7 @@ def run(args: argparse.Namespace) -> int:
     ensure_audio_models(comfy_dir, music=bool(args.music), sfx=bool(args.sfx))
     if args.music:
         ensure_music_checkpoint_file(comfy_dir, args.music_checkpoint)
+        ensure_music_text_encoder_file(comfy_dir, args.music_text_encoder)
     print("Waiting for ComfyUI", flush=True)
     wait_for_comfy(args.comfy_url, timeout_seconds=180, poll_seconds=args.poll_seconds)
 
@@ -420,6 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--music-negative", default="low quality, distorted, noisy, clipping")
     parser.add_argument("--music-cue-seconds", type=float, default=30.0)
     parser.add_argument("--music-checkpoint", default="stable_audio_open_1.0.safetensors")
+    parser.add_argument("--music-text-encoder", default="t5_base.safetensors")
     parser.add_argument("--music-steps", type=int, default=80)
     parser.add_argument("--music-cfg", type=float, default=6.0)
     parser.add_argument("--sfx-prompt", default="")

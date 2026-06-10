@@ -957,6 +957,11 @@ if ($DownloadModels -and -not $SkipModelDownloads) {
         } catch {
             Write-Warning "Skipped Stable Audio Open (music). Accept the licence + 'hf auth login', or it downloads on first use. Details: $_"
         }
+        try {
+            Download-HfFile 'google-t5/t5-base' 'model.safetensors' (Join-Path $ComfyDir 'models\text_encoders\t5_base.safetensors')
+        } catch {
+            Write-Warning "Skipped T5-base text encoder for Stable Audio music; it downloads on first use. Details: $_"
+        }
         foreach ($mmaudioFile in @('mmaudio_large_44k_v2_fp16.safetensors','mmaudio_vae_44k_fp16.safetensors','mmaudio_synchformer_fp16.safetensors','apple_DFN5B-CLIP-ViT-H-14-384_fp16.safetensors')) {
             try {
                 Download-HfFile 'Kijai/MMAudio_safetensors' $mmaudioFile (Join-Path $ComfyDir "models\mmaudio\$mmaudioFile")

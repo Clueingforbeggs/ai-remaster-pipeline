@@ -107,6 +107,7 @@ function renderSignature() {
     aspect_preview: state.aspect_preview,
     shot_views: state.shot_views,
     outpaint_chunks: state.outpaint_chunks,
+    audio_stems: state.audio_stems,
     cache: state.cache,
     progress: state.progress,
     phase_progress: state.phase_progress,

@@ -25,6 +25,7 @@ logs guidance and continues instead of aborting the stage.
 
 ### Music — Stable Audio Open (ComfyUI core audio nodes)
 - Checkpoint: `stabilityai/stable-audio-open-1.0/model.safetensors` → `models/checkpoints/stable_audio_open_1.0.safetensors`
+- Text encoder: `google-t5/t5-base/model.safetensors` → `models/text_encoders/t5_base.safetensors`
 - **Gated model.** Accept the licence at https://huggingface.co/stabilityai/stable-audio-open-1.0
   and authenticate (`hf auth login`, or set `HF_TOKEN`) before the download can succeed. If it
   is skipped, place the file manually at the destination above.

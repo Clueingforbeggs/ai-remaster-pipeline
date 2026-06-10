@@ -24,6 +24,8 @@ No custom nodes needed; these ship with ComfyUI:
 `VAEDecodeAudio`, `SaveAudio`.
 
 Auto-downloaded to `ComfyUI/models/checkpoints/stable_audio_open_1.0.safetensors`.
+The separate T5-base text encoder is auto-downloaded to
+`ComfyUI/models/text_encoders/t5_base.safetensors`.
 **This is a gated Hugging Face model** — accept the licence at
 https://huggingface.co/stabilityai/stable-audio-open-1.0 and run `hf auth login` (or set
 `HF_TOKEN`) so the download can authenticate; otherwise place the file there manually.

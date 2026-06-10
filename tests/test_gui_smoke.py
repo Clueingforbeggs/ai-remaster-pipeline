@@ -1018,6 +1018,40 @@ class GuiSmokeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "stable_audio_open_1.0.safetensors"):
             audio_models.ensure_checkpoint_choice(info, "stable_audio_open_1.0.safetensors")
 
+    def test_stable_audio_music_graph_loads_separate_t5_encoder(self) -> None:
+        info = {
+            "KSampler": {
+                "input": {
+                    "required": {
+                        "sampler_name": (["euler"], {}),
+                        "scheduler": (["simple"], {}),
+                    },
+                },
+            },
+            "EmptyLatentAudio": {"input": {"required": {"seconds": ("FLOAT", {"default": 30.0}), "batch_size": ("INT", {"default": 1})}}},
+        }
+
+        graph = audio_models.music_prompt_graph(
+            info,
+            checkpoint="stable_audio_open_1.0.safetensors",
+            text_encoder="t5_base.safetensors",
+            prompt="orchestral",
+            negative="noise",
+            seconds=12.0,
+            steps=20,
+            cfg=6.0,
+            seed=42,
+            prefix="arp_audio/music_test",
+        )
+
+        self.assertEqual(graph["2"]["class_type"], "CLIPLoader")
+        self.assertEqual(graph["2"]["inputs"]["clip_name"], "t5_base.safetensors")
+        self.assertEqual(graph["2"]["inputs"]["type"], "stable_audio")
+        self.assertEqual(graph["5"]["class_type"], "ConditioningStableAudio")
+        self.assertEqual(graph["7"]["inputs"]["positive"], ["5", 0])
+        self.assertEqual(graph["7"]["inputs"]["negative"], ["5", 1])
+        self.assertEqual(graph["8"]["inputs"]["samples"], ["7", 0])
+
     def test_music_checkpoint_file_preflight_reports_gated_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             with self.assertRaisesRegex(FileNotFoundError, "stabilityai/stable-audio-open-1.0"):
@@ -1096,6 +1130,38 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(message, "")
         open_browser.assert_not_called()
+
+    def test_audio_state_exposes_lossless_stems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            source = root / "input" / "Silent Movie.mp4"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"not a real video")
+            stem_dir = root / ".cache" / "audio" / "Silent_Movie"
+            stem_dir.mkdir(parents=True)
+            (stem_dir / "music_stem.wav").write_bytes(b"music")
+            (stem_dir / "sfx_stem.wav").write_bytes(b"sfx")
+
+            app.APP.settings["global"].update(
+                {
+                    "source": str(source),
+                    "expand_outpaint": "false",
+                    "colorize": "false",
+                    "add_soundtrack": "true",
+                    "section_start": "0",
+                    "section_end": "",
+                }
+            )
+            with mock.patch.object(server, "ROOT", root):
+                payload = app.APP.state("audio")
+
+            stems = {row["key"]: row for row in payload["audio_stems"]}
+            self.assertEqual(set(stems), {"music", "sfx", "mixed"})
+            self.assertTrue(stems["music"]["exists"])
+            self.assertTrue(stems["sfx"]["exists"])
+            self.assertFalse(stems["mixed"]["exists"])
+            self.assertEqual(stems["music"]["path"], ".cache/audio/Silent_Movie/music_stem.wav")
+            self.assertEqual(stems["sfx"]["path"], ".cache/audio/Silent_Movie/sfx_stem.wav")
 
     def test_source_section_names_include_trim_points(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "12", "section_end": "24"})
