@@ -20,8 +20,20 @@ def default_output(source: Path, width: int, height: int) -> Path:
     return ROOT / "output" / "upscaled" / f"{safe_stem(source.name)}_{suffix}.mp4"
 
 
+# The legacy single-node workflow hardcoded these values, so leaving a knob at its
+# default produces the same pixels as before the advanced node was adopted.
+ADVANCED_DEFAULTS = {
+    "flashvsr_color_fix": True,
+    "flashvsr_tile_size": 256,
+    "flashvsr_tile_overlap": 24,
+    "flashvsr_sparse_ratio": 2.0,
+    "flashvsr_kv_ratio": 3.0,
+    "flashvsr_local_range": 11,
+}
+
+
 def signature(args: argparse.Namespace, source: Path, output_width: int, output_height: int) -> dict[str, Any]:
-    return {
+    sig = {
         "version": 4,
         "tool": "upscale_video.py",
         "method": "flashvsr_ultra_fast",
@@ -42,6 +54,13 @@ def signature(args: argparse.Namespace, source: Path, output_width: int, output_
         "overlap_frames": args.overlap_frames,
         "fps": args.fps,
     }
+    # Only record advanced knobs that differ from the legacy behaviour so outputs and
+    # cached chunks rendered before these flags existed remain reusable.
+    for name, default in ADVANCED_DEFAULTS.items():
+        value = getattr(args, name)
+        if value != default:
+            sig[name] = value
+    return sig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -63,6 +82,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-flashvsr-tiled-dit", dest="flashvsr_tiled_dit", action="store_false")
     parser.add_argument("--flashvsr-unload-dit", dest="flashvsr_unload_dit", action="store_true", default=False)
     parser.add_argument("--no-flashvsr-unload-dit", dest="flashvsr_unload_dit", action="store_false")
+    parser.add_argument("--flashvsr-color-fix", dest="flashvsr_color_fix", action="store_true", default=True, help="Wavelet color correction that matches output colors back to the source.")
+    parser.add_argument("--no-flashvsr-color-fix", dest="flashvsr_color_fix", action="store_false")
+    parser.add_argument("--flashvsr-tile-size", type=int, default=256, help="DiT tile edge in pixels when tiled DiT is on (multiple of 32, max 1024). Larger tiles give faces more surrounding context at the cost of VRAM.")
+    parser.add_argument("--flashvsr-tile-overlap", type=int, default=24, help="Feathered overlap between DiT tiles in pixels; raise it if tile seams are visible.")
+    parser.add_argument("--flashvsr-sparse-ratio", type=float, default=2.0, help="Sparse attention density, 1.5-2.0: 2.0 is most stable, 1.5 is faster.")
+    parser.add_argument("--flashvsr-kv-ratio", type=float, default=3.0, help="Attention memory budget, 1.0-3.0: 3.0 is highest quality, lower saves VRAM.")
+    parser.add_argument("--flashvsr-local-range", type=int, choices=[9, 11], default=11, help="Temporal attention window: 11 is more stable, 9 keeps more fine motion (lips) and detail.")
     parser.add_argument("--flashvsr-seed", type=int, default=0)
     parser.add_argument("--chunk-seconds", type=float, default=6.0, help="Upscale in chunks of roughly this many seconds. Use 0 to send the whole clip.")
     parser.add_argument("--overlap-frames", type=int, default=8, help="Frames repeated before each chunk, then trimmed before stitching.")
@@ -82,14 +108,14 @@ def default_from_spec(spec: Any) -> Any:
     return None
 
 
-def flashvsr_node_inputs(args: argparse.Namespace, class_type: str, source_node: str, info: dict[str, Any]) -> dict[str, Any]:
-    inputs: dict[str, Any] = {"frames": [source_node, 0]}
+def flashvsr_node_inputs(class_type: str, info: dict[str, Any], values: dict[str, Any], connections: dict[str, list[Any]]) -> dict[str, Any]:
+    inputs: dict[str, Any] = dict(connections)
     input_info = info.get(class_type, {}).get("input", {})
     accepted: set[str] = set()
     for group in ("required", "optional"):
         for name, spec in (input_info.get(group) or {}).items():
             accepted.add(name)
-            if name == "frames":
+            if name in connections:
                 continue
             value = default_from_spec(spec)
             if value is not None:
@@ -97,22 +123,32 @@ def flashvsr_node_inputs(args: argparse.Namespace, class_type: str, source_node:
 
     # Use the Ultra Fast node's real input names so ARP logs and saved settings map
     # directly to the Comfy node.
-    for name, value in {
-        "model": args.flashvsr_model,
-        "mode": args.flashvsr_mode,
-        "scale": args.flashvsr_scale,
-        "tiled_vae": bool(args.flashvsr_tiled_vae),
-        "tiled_dit": bool(args.flashvsr_tiled_dit),
-        "unload_dit": bool(args.flashvsr_unload_dit),
-        "seed": args.flashvsr_seed,
-    }.items():
+    for name, value in values.items():
         if not accepted or name in accepted:
             inputs[name] = value
     return inputs
 
 
 def flashvsr_prompt(video_name: str, fps: float, args: argparse.Namespace, prefix: str, info: dict[str, Any]) -> dict[str, Any]:
-    class_type = "FlashVSRNode"
+    init_values = {
+        "model": args.flashvsr_model,
+        "mode": args.flashvsr_mode,
+        # The basic FlashVSRNode ran fp16; keep it so existing renders stay reproducible.
+        "precision": "fp16",
+    }
+    adv_values = {
+        "scale": args.flashvsr_scale,
+        "color_fix": bool(args.flashvsr_color_fix),
+        "tiled_vae": bool(args.flashvsr_tiled_vae),
+        "tiled_dit": bool(args.flashvsr_tiled_dit),
+        "tile_size": args.flashvsr_tile_size,
+        "tile_overlap": args.flashvsr_tile_overlap,
+        "unload_dit": bool(args.flashvsr_unload_dit),
+        "sparse_ratio": args.flashvsr_sparse_ratio,
+        "kv_ratio": args.flashvsr_kv_ratio,
+        "local_range": args.flashvsr_local_range,
+        "seed": args.flashvsr_seed,
+    }
     return {
         "1": {
             "class_type": "VHS_LoadVideo",
@@ -127,11 +163,12 @@ def flashvsr_prompt(video_name: str, fps: float, args: argparse.Namespace, prefi
                 "format": "None",
             },
         },
-        "2": {"class_type": class_type, "inputs": flashvsr_node_inputs(args, class_type, "1", info)},
-        "3": {
+        "2": {"class_type": "FlashVSRInitPipe", "inputs": flashvsr_node_inputs("FlashVSRInitPipe", info, init_values, {})},
+        "3": {"class_type": "FlashVSRNodeAdv", "inputs": flashvsr_node_inputs("FlashVSRNodeAdv", info, adv_values, {"pipe": ["2", 0], "frames": ["1", 0]})},
+        "4": {
             "class_type": "VHS_VideoCombine",
             "inputs": {
-                "images": ["2", 0],
+                "images": ["3", 0],
                 "audio": ["1", 2],
                 "frame_rate": fps,
                 "loop_count": 0,
@@ -156,7 +193,8 @@ def flashvsr_run(args: argparse.Namespace, source: Path, partial: Path, output_w
     required_nodes = {
         "VHS_LoadVideo": "ComfyUI-VideoHelperSuite",
         "VHS_VideoCombine": "ComfyUI-VideoHelperSuite",
-        "FlashVSRNode": "ComfyUI-FlashVSR_Ultra_Fast",
+        "FlashVSRInitPipe": "ComfyUI-FlashVSR_Ultra_Fast",
+        "FlashVSRNodeAdv": "ComfyUI-FlashVSR_Ultra_Fast",
     }
     ensure_node_types(args.comfy_url, required_nodes, "FlashVSR upscaling")
     info = object_info(args.comfy_url)

@@ -46,13 +46,58 @@ function sourceInfoHtml(info) {
   return items ? `<div class="source-info">${items}</div>` : '';
 }
 
+// Help text shown under stage fields. Keys are "<stage>.<field>" with a bare
+// "<field>" fallback for keys that are unique across stages.
+const FIELD_DESCRIPTIONS = {
+  'upscale.flashvsr_mode':
+    'tiny = fastest, but its distilled decoder can smear fine motion such as lips. ' +
+    'full = real VAE decoder with the best fidelity for faces and small movements, slowest. ' +
+    'tiny-long = tiny with lower VRAM use on long clips.',
+  'upscale.flashvsr_scale':
+    'How far the model upscales before the final resize to the target size. 2 stays closest to the source; 3-4 invent more detail (and hallucinate more).',
+  'upscale.flashvsr_tiled_dit':
+    'Processes the frame as small tiles to save VRAM. Tiles only see their own patch, so small faces can lose identity ' +
+    '(the model invents a plausible face). Untick for full-frame context if VRAM allows - the biggest lever against changed faces.',
+  'upscale.flashvsr_tile_size':
+    'Tile edge in pixels when tiled diffusion is on (multiples of 32, max 1024). Larger tiles give faces more surrounding context at the cost of VRAM. Try 512 if full-frame does not fit.',
+  'upscale.flashvsr_tile_overlap':
+    'Feathered overlap between tiles that hides seams. Raise it if you can see tile borders.',
+  'upscale.flashvsr_local_range':
+    'Temporal attention window. 11 = more stable but can freeze small motion such as mouths; 9 = sharper, livelier detail with slightly more shimmer.',
+  'upscale.flashvsr_sparse_ratio':
+    'Sparse attention density, 1.5 to 2.0. 2.0 = most stable output; 1.5 = faster.',
+  'upscale.flashvsr_kv_ratio':
+    'Attention memory budget, 1.0 to 3.0. 3.0 = highest quality; lower it to save VRAM, e.g. when turning tiled diffusion off.',
+  'upscale.flashvsr_color_fix':
+    'Wavelet transform that matches output colors back to the source. Leave on to prevent color drift on colorized footage.',
+  'upscale.flashvsr_tiled_vae':
+    'Decode the output in tiles to reduce VRAM at some speed cost. Negligible quality impact.',
+  'upscale.flashvsr_unload_dit':
+    'Unload the diffusion model before decoding to lower peak VRAM. Slower; only needed if decoding runs out of memory.',
+  'upscale.flashvsr_seed':
+    'Changes the detail the model invents. If a face renders wrong, re-rolling the seed (with Regenerate) often fixes it.',
+  'upscale.chunk_seconds':
+    'The clip is upscaled in chunks of roughly this many seconds; each chunk restarts the model’s temporal stream. 0 sends the whole clip at once.',
+  'upscale.overlap_frames':
+    'Warm-up frames repeated before each chunk and trimmed afterwards. Raise to 16-24 if chunk starts look unstable or faces flip identity mid-scene.',
+};
+
+function fieldDescription(stageKey, key) {
+  return FIELD_DESCRIPTIONS[`${stageKey}.${key}`] || FIELD_DESCRIPTIONS[key] || '';
+}
+
+function fieldHelpHtml(help) {
+  return help ? `<small class="field-help">${esc(help)}</small>` : '';
+}
+
 function fieldHtml(st, field) {
   const [key, label, kind, defaultValue] = field;
   const value = settings(st.key)[key] ?? defaultValue ?? '';
+  const help = fieldDescription(st.key, key);
 
-  if (kind.startsWith('select:')) return selectFieldHtml(key, label, kind, value);
-  if (kind.startsWith('range:')) return rangeFieldHtml(key, label, kind, value);
-  if (kind === 'checkbox') return checkboxFieldHtml(key, label, value);
+  if (kind.startsWith('select:')) return selectFieldHtml(key, label, kind, value) + fieldHelpHtml(help);
+  if (kind.startsWith('range:')) return rangeFieldHtml(key, label, kind, value) + fieldHelpHtml(help);
+  if (kind === 'checkbox') return checkboxFieldHtml(key, label, value, help);
 
   const input = `
     <input data-field="${key}" data-kind="${kind}" type="${kind === 'number' ? 'number' : 'text'}" step="any" value="${esc(value)}">
@@ -65,10 +110,11 @@ function fieldHtml(st, field) {
         ${input}
         <button type="button" onclick="browseField('${st.key}','${key}','${kind}')">Browse</button>
       </div>
+      ${fieldHelpHtml(help)}
     `;
   }
 
-  return `<label>${label}</label>${input}`;
+  return `<label>${label}</label>${input}${fieldHelpHtml(help)}`;
 }
 
 function selectFieldHtml(key, label, kind, value) {
@@ -134,7 +180,7 @@ const CHECKBOX_DESCRIPTIONS = {
     'it extends from a filled frame instead of copying the bars. Slower, but reliable on stubborn clips.',
 };
 
-function checkboxFieldHtml(key, label, value) {
+function checkboxFieldHtml(key, label, value, help = '') {
   const description = CHECKBOX_DESCRIPTIONS[key];
   if (description) {
     return `
@@ -143,6 +189,17 @@ function checkboxFieldHtml(key, label, value) {
         <span class="checkbox-feature-text">
           <strong>${esc(label)}</strong>
           <small>${esc(description)}</small>
+        </span>
+      </label>
+    `;
+  }
+  if (help) {
+    return `
+      <label class="checkbox-described">
+        <input data-field="${key}" data-kind="checkbox" type="checkbox" ${value === 'true' ? 'checked' : ''}>
+        <span class="checkbox-described-text">
+          <strong>${esc(label)}</strong>
+          <small>${esc(help)}</small>
         </span>
       </label>
     `;

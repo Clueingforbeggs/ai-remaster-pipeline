@@ -265,7 +265,7 @@ class GuiSmokeTests(unittest.TestCase):
             "ComfyUI-LTXVideo": ("LTXVImgToVideoConditionOnly", "LTXAddVideoICLoRAGuide", "LTXVPreprocess"),
             "ComfyUI-GGUF": ("UnetLoaderGGUF",),
             "ComfyUI-VideoHelperSuite": ("VHS_LoadVideo", "VHS_VideoCombine"),
-            "ComfyUI-FlashVSR_Ultra_Fast": ("FlashVSRNode",),
+            "ComfyUI-FlashVSR_Ultra_Fast": ("FlashVSRInitPipe", "FlashVSRNodeAdv"),
             "reference-video-colorization": ("DeepExColorVideoNode", "ColorMNetVideo"),
         }
         vendor_root = app.ROOT / "vendor" / "comfyui_custom_nodes"
@@ -1801,7 +1801,27 @@ class GuiSmokeTests(unittest.TestCase):
 
     def test_upscale_only_uses_pipeline_source(self) -> None:
         app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
-        app.APP.settings["upscale"].update({"target_width": "1920", "target_height": "1080"})
+        # Pin every asserted field: settings are read from the live .ai_remaster_gui.json,
+        # so values left over from a real project would otherwise leak into the command.
+        app.APP.settings["upscale"].update(
+            {
+                "target_width": "1920",
+                "target_height": "1080",
+                "flashvsr_model": "FlashVSR-v1.1",
+                "flashvsr_mode": "tiny",
+                "flashvsr_tiled_vae": "true",
+                "flashvsr_tiled_dit": "true",
+                "flashvsr_color_fix": "true",
+                "flashvsr_unload_dit": "false",
+                "flashvsr_tile_size": "256",
+                "flashvsr_tile_overlap": "24",
+                "flashvsr_local_range": "11",
+                "flashvsr_sparse_ratio": "2.0",
+                "flashvsr_kv_ratio": "3.0",
+                "chunk_seconds": "6",
+                "overlap_frames": "8",
+            }
+        )
 
         app.APP.hydrate_stage_inputs("global")
         stage_keys = [stage.key for stage in app.APP.active_stages()]
@@ -1817,7 +1837,13 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(command[command.index("--flashvsr-mode") + 1], "tiny")
         self.assertIn("--flashvsr-tiled-vae", command)
         self.assertIn("--flashvsr-tiled-dit", command)
+        self.assertIn("--flashvsr-color-fix", command)
         self.assertNotIn("--flashvsr-unload-dit", command)
+        self.assertEqual(command[command.index("--flashvsr-tile-size") + 1], "256")
+        self.assertEqual(command[command.index("--flashvsr-tile-overlap") + 1], "24")
+        self.assertEqual(command[command.index("--flashvsr-local-range") + 1], "11")
+        self.assertEqual(command[command.index("--flashvsr-sparse-ratio") + 1], "2.0")
+        self.assertEqual(command[command.index("--flashvsr-kv-ratio") + 1], "3.0")
         self.assertEqual(command[command.index("--chunk-seconds") + 1], "6")
         self.assertEqual(command[command.index("--overlap-frames") + 1], "8")
         self.assertIn("scripts\\upscale_video.py", " ".join(command))
@@ -2020,40 +2046,91 @@ class GuiSmokeTests(unittest.TestCase):
             flashvsr_tiled_vae=True,
             flashvsr_tiled_dit=True,
             flashvsr_unload_dit=True,
+            flashvsr_color_fix=True,
+            flashvsr_tile_size=512,
+            flashvsr_tile_overlap=24,
+            flashvsr_sparse_ratio=2.0,
+            flashvsr_kv_ratio=3.0,
+            flashvsr_local_range=9,
             flashvsr_seed=123,
         )
         info = {
-            "FlashVSRNode": {
+            "FlashVSRInitPipe": {
                 "input": {
                     "required": {
-                        "frames": ("IMAGE",),
                         "model": (["FlashVSR", "FlashVSR-v1.1"],),
                         "mode": (["tiny", "tiny-long", "full"],),
+                        "alt_vae": (["none"], {"default": "none"}),
+                        "force_offload": ("BOOLEAN", {"default": True}),
+                        "precision": (["fp16", "bf16"], {"default": "bf16"}),
+                        "device": (["auto"], {"default": "auto"}),
+                        "attention_mode": (["sparse_sage_attention", "block_sparse_attention"], {"default": "sparse_sage_attention"}),
+                    }
+                }
+            },
+            "FlashVSRNodeAdv": {
+                "input": {
+                    "required": {
+                        "pipe": ("PIPE",),
+                        "frames": ("IMAGE",),
                         "scale": ("INT", {"default": 4}),
+                        "color_fix": ("BOOLEAN", {"default": True}),
                         "tiled_vae": ("BOOLEAN", {"default": True}),
                         "tiled_dit": ("BOOLEAN", {"default": True}),
+                        "tile_size": ("INT", {"default": 256}),
+                        "tile_overlap": ("INT", {"default": 24}),
                         "unload_dit": ("BOOLEAN", {"default": False}),
+                        "sparse_ratio": ("FLOAT", {"default": 2.0}),
+                        "kv_ratio": ("FLOAT", {"default": 3.0}),
+                        "local_range": ("INT", {"default": 11}),
                         "seed": ("INT", {"default": 0}),
                     }
                 }
-            }
+            },
         }
 
         prompt = upscale_video.flashvsr_prompt("example.mp4", 24.0, args, "arp_upscale/example", info)
 
         self.assertEqual(prompt["1"]["class_type"], "VHS_LoadVideo")
-        self.assertEqual(prompt["2"]["class_type"], "FlashVSRNode")
-        self.assertEqual(prompt["2"]["inputs"]["frames"], ["1", 0])
+        self.assertEqual(prompt["2"]["class_type"], "FlashVSRInitPipe")
         self.assertEqual(prompt["2"]["inputs"]["model"], "FlashVSR-v1.1")
         self.assertEqual(prompt["2"]["inputs"]["mode"], "tiny")
-        self.assertEqual(prompt["2"]["inputs"]["scale"], 2)
-        self.assertEqual(prompt["2"]["inputs"]["tiled_vae"], True)
-        self.assertEqual(prompt["2"]["inputs"]["tiled_dit"], True)
-        self.assertEqual(prompt["2"]["inputs"]["unload_dit"], True)
-        self.assertEqual(prompt["2"]["inputs"]["seed"], 123)
-        self.assertEqual(prompt["3"]["class_type"], "VHS_VideoCombine")
-        self.assertEqual(prompt["3"]["inputs"]["images"], ["2", 0])
-        self.assertEqual(prompt["3"]["inputs"]["audio"], ["1", 2])
+        self.assertEqual(prompt["2"]["inputs"]["precision"], "fp16")
+        self.assertEqual(prompt["2"]["inputs"]["force_offload"], True)
+        self.assertEqual(prompt["3"]["class_type"], "FlashVSRNodeAdv")
+        self.assertEqual(prompt["3"]["inputs"]["pipe"], ["2", 0])
+        self.assertEqual(prompt["3"]["inputs"]["frames"], ["1", 0])
+        self.assertEqual(prompt["3"]["inputs"]["scale"], 2)
+        self.assertEqual(prompt["3"]["inputs"]["color_fix"], True)
+        self.assertEqual(prompt["3"]["inputs"]["tiled_vae"], True)
+        self.assertEqual(prompt["3"]["inputs"]["tiled_dit"], True)
+        self.assertEqual(prompt["3"]["inputs"]["tile_size"], 512)
+        self.assertEqual(prompt["3"]["inputs"]["tile_overlap"], 24)
+        self.assertEqual(prompt["3"]["inputs"]["unload_dit"], True)
+        self.assertEqual(prompt["3"]["inputs"]["sparse_ratio"], 2.0)
+        self.assertEqual(prompt["3"]["inputs"]["kv_ratio"], 3.0)
+        self.assertEqual(prompt["3"]["inputs"]["local_range"], 9)
+        self.assertEqual(prompt["3"]["inputs"]["seed"], 123)
+        self.assertEqual(prompt["4"]["class_type"], "VHS_VideoCombine")
+        self.assertEqual(prompt["4"]["inputs"]["images"], ["3", 0])
+        self.assertEqual(prompt["4"]["inputs"]["audio"], ["1", 2])
+
+    def test_upscale_signature_only_records_advanced_knobs_when_changed(self) -> None:
+        parser = upscale_video.build_parser()
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            source = Path(tmp_text) / "source.mp4"
+            source.write_bytes(b"placeholder")
+
+            defaults = upscale_video.signature(parser.parse_args(["--input", str(source)]), source, 1920, 1080)
+            tweaked = upscale_video.signature(parser.parse_args(["--input", str(source), "--flashvsr-local-range", "9", "--flashvsr-tile-size", "512"]), source, 1920, 1080)
+
+        # Advanced knobs at their defaults reproduce the legacy single-node output, so
+        # they must not invalidate signatures written before the knobs existed.
+        for name in upscale_video.ADVANCED_DEFAULTS:
+            self.assertNotIn(name, defaults)
+        self.assertEqual(tweaked["flashvsr_local_range"], 9)
+        self.assertEqual(tweaked["flashvsr_tile_size"], 512)
+        self.assertNotIn("flashvsr_kv_ratio", tweaked)
 
     def test_upscale_chunk_ranges_overlap_without_dropping_frames(self) -> None:
         ranges = upscale_video.chunk_ranges(total_frames=100, fps=10.0, chunk_seconds=3.0, overlap_frames=4)

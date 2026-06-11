@@ -48,6 +48,11 @@ config = load_local_config()
 DEFAULT_MUSIC_PROMPT = "Gentle cinematic orchestral score, melodic, instrumental, period-appropriate, soft dynamics."
 DEFAULT_SFX_PROMPT = "Natural ambient sound and foley matching the on-screen action."
 
+# MMAudio's Synchformer branch consumes frames at exactly 25 fps and its node slices
+# the tensor by frame count, not timestamps; proxies must be retimed to this rate or
+# the generated audio is time-warped and truncated to frames/25 seconds.
+MMAUDIO_FPS = 25
+
 
 # ── ffmpeg helpers ────────────────────────────────────────────────────────────
 
@@ -65,7 +70,7 @@ def extract_frame(ffmpeg: str, source: Path, seconds: float, target: Path, short
     target.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg([
         ffmpeg, "-y", "-ss", f"{max(0.0, seconds):.3f}", "-i", str(source),
-        "-frames:v", "1",
+        "-frames:v", "1", "-update", "1",
         "-vf", f"scale=-2:'min({short_side},ih)':flags=lanczos",
         "-q:v", "2", str(target),
     ])
@@ -73,13 +78,13 @@ def extract_frame(ffmpeg: str, source: Path, seconds: float, target: Path, short
 
 
 def make_sfx_proxy(ffmpeg: str, source: Path, start: float, duration: float, short_side: int, target: Path) -> Path:
-    """A muted, low-resolution chunk (short side capped at ``short_side``) for MMAudio."""
+    """A muted, low-resolution, 25fps chunk (short side capped at ``short_side``) for MMAudio."""
     target.parent.mkdir(parents=True, exist_ok=True)
     short = max(64, int(short_side) // 2 * 2)
     scale = f"scale='if(gt(iw,ih),-2,{short})':'if(gt(iw,ih),{short},-2)':flags=bicubic"
     run_ffmpeg([
         ffmpeg, "-y", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source),
-        "-an", "-vf", scale, "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
+        "-an", "-vf", f"{scale},fps={MMAUDIO_FPS}", "-c:v", "libx264", "-crf", "20", "-preset", "veryfast",
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(target),
     ])
     return target
@@ -170,11 +175,12 @@ def mux_audio(ffmpeg: str, video: Path, audio: Path, output: Path) -> Path:
 # ── Scene detection (lightweight, self-contained) ─────────────────────────────
 
 
-def detect_scenes(source: Path, duration: float, cue_seconds: float) -> list[tuple[float, float]]:
+def detect_scenes(source: Path, duration: float, cue_seconds: float, min_len: float | None = None) -> list[tuple[float, float]]:
     """Return contiguous (start, end) scene spans tiling [0, duration].
 
     Samples frames ~every 1.5s, places a boundary on large colour-histogram jumps, then
     enforces a minimum/maximum cue length so music does not change too often or drift.
+    ``min_len`` overrides the music-oriented minimum span (SFX windows can be shorter).
     """
     import cv2
     import numpy as np
@@ -188,7 +194,7 @@ def detect_scenes(source: Path, duration: float, cue_seconds: float) -> list[tup
 
     step = max(1, int(round(1.5 * fps)))
     threshold = 0.45
-    min_len = max(6.0, cue_seconds * 0.5)
+    min_len = max(6.0, cue_seconds * 0.5) if min_len is None else max(1.0, float(min_len))
     max_len = max(min_len + 1.0, cue_seconds)
 
     boundaries = [0.0]
@@ -245,6 +251,46 @@ def detect_scenes(source: Path, duration: float, cue_seconds: float) -> list[tup
 # ── Stage builders ────────────────────────────────────────────────────────────
 
 
+MUSIC_CAPTION_QUESTION = (
+    "Describe this film scene in ONE short phrase covering mood, setting, and era "
+    "(e.g. 'tense, shadowy industrial laboratory, 1920s'). Answer with the phrase only - "
+    "no song or artist suggestions, no lists, no explanations."
+)
+SFX_CAPTION_QUESTION = (
+    "You are a foley artist. List the concrete sounds this film moment would produce, as one short "
+    "comma-separated line (e.g. 'heavy machinery clanking, steam hiss, footsteps on metal'). "
+    "Name sounds caused by visible movement and action first, then background ambience. "
+    "Only sounds - no music, no dialogue, no commentary."
+)
+
+
+def resolve_captioner(args: argparse.Namespace):
+    """Return (label, fn(image_path, question) -> str) for the best available caption backend.
+
+    Preference order: the user-specified ComfyUI node, then a vision model on the local
+    Ollama server. Returns None when neither is available (captioning is skipped).
+    """
+    if args.caption_node:
+        def comfy_captioner(image_path: Path, question: str) -> str:
+            return audio_models.run_caption(
+                args.comfy_url, resolve_path(args.comfy_dir),
+                image_path=image_path, node_class=args.caption_node,
+                question=question, poll_seconds=args.poll_seconds,
+            )
+        return f"ComfyUI node '{args.caption_node}'", comfy_captioner
+    choice = (args.ollama_vision_model or "").strip()
+    if choice.lower() in ("off", "none"):
+        return None
+    model = audio_models.pick_ollama_vision_model(args.ollama_url) if choice.lower() in ("", "auto") else choice
+    if not model:
+        return None
+
+    def ollama_captioner(image_path: Path, question: str) -> str:
+        return audio_models.run_ollama_caption(args.ollama_url, model, image_path=image_path, question=question)
+
+    return f"Ollama model '{model}'", ollama_captioner
+
+
 def combine_music_prompt(caption: str, style_hint: str) -> str:
     parts = [p.strip() for p in (caption, style_hint) if p and p.strip()]
     if not parts:
@@ -253,29 +299,46 @@ def combine_music_prompt(caption: str, style_hint: str) -> str:
     return f"{body}. Instrumental score, no vocals."
 
 
-def build_music_stem(args: argparse.Namespace, ffmpeg: str, source: Path, duration: float, work_dir: Path) -> Path:
+def combine_sfx_prompt(caption: str, style_hint: str) -> str:
+    parts = [p.strip() for p in (caption, style_hint) if p and p.strip()]
+    return ". ".join(parts) if parts else DEFAULT_SFX_PROMPT
+
+
+def caption_midpoint_frame(ffmpeg: str, source: Path, start: float, end: float, target: Path, captioner, question: str) -> str:
+    """Best-effort caption of the span's middle frame; returns "" when unavailable/failed."""
+    if captioner is None:
+        return ""
+    label, fn = captioner
+    try:
+        frame = extract_frame(ffmpeg, source, (start + end) / 2.0, target)
+        return fn(frame, question)
+    except Exception as exc:
+        print(f"Warning: captioning failed ({label}: {exc}); using the prompt hint instead.", flush=True)
+        return ""
+
+
+def build_music_stem(args: argparse.Namespace, ffmpeg: str, source: Path, duration: float, work_dir: Path, captioner) -> Path:
     print("Detecting scenes for the music score", flush=True)
-    scenes = detect_scenes(source, duration, float(args.music_cue_seconds))
+    cue_seconds = float(args.music_cue_seconds)
+    if cue_seconds > 46.0:
+        # Stable Audio Open 1.0 generates at most ~47s of audio; each cue is composed at
+        # scene length + 1s of trim headroom, so scenes must stay within 46s.
+        print(f"Note: capping music cue length at 46s (Stable Audio Open's limit); {cue_seconds:.0f}s was requested.", flush=True)
+        cue_seconds = 46.0
+    scenes = detect_scenes(source, duration, cue_seconds)
     print(f"Detected {len(scenes)} music scene(s).", flush=True)
     cue_dir = work_dir / "music_cues"
     cue_dir.mkdir(parents=True, exist_ok=True)
     fixed_cues: list[Path] = []
-    question = "Describe the mood, setting, and era of this film scene in a few words for choosing background music."
     for index, (start, end) in enumerate(scenes):
         length = max(1.0, end - start)
-        caption = ""
-        try:
-            frame = extract_frame(ffmpeg, source, (start + end) / 2.0, cue_dir / f"scene_{index:04d}.png")
-            print(f"Captioning scene {index + 1}/{len(scenes)} (Qwen-VL)", flush=True)
-            caption = audio_models.run_caption(
-                args.comfy_url, resolve_path(args.comfy_dir),
-                image_path=frame, node_class=args.caption_node,
-                question=question, poll_seconds=args.poll_seconds,
-            )
-            if caption:
-                print(f"  scene {index + 1} caption: {caption}", flush=True)
-        except Exception as exc:  # captioning is best-effort; fall back to the style hint.
-            print(f"Warning: scene captioning failed ({exc}); using the music style hint instead.", flush=True)
+        if captioner is not None:
+            print(f"Captioning scene {index + 1}/{len(scenes)}", flush=True)
+        caption = caption_midpoint_frame(
+            ffmpeg, source, start, end, cue_dir / f"scene_{index:04d}.png", captioner, MUSIC_CAPTION_QUESTION
+        )
+        if caption:
+            print(f"  scene {index + 1} caption: {caption}", flush=True)
         prompt = combine_music_prompt(caption, args.music_prompt)
         print(f"Composing music cue {index + 1}/{len(scenes)} ({length:.1f}s)", flush=True)
         raw = audio_models.run_music_cue(
@@ -293,21 +356,39 @@ def build_music_stem(args: argparse.Namespace, ffmpeg: str, source: Path, durati
     return stem
 
 
-def build_sfx_stem(args: argparse.Namespace, ffmpeg: str, source: Path, duration: float, work_dir: Path) -> Path:
+def build_sfx_stem(args: argparse.Namespace, ffmpeg: str, source: Path, duration: float, work_dir: Path, captioner) -> Path:
     chunk = max(2.0, float(args.sfx_chunk_seconds))
-    count = max(1, int(math.ceil(duration / chunk)))
+    if chunk > 12.0:
+        print(
+            f"Warning: SFX chunks of {chunk:.0f}s are far beyond MMAudio's 8s training length; "
+            "effects tend to dissolve into vague ambience. 8-10s chunks track the picture best.",
+            flush=True,
+        )
+    if (args.sfx_scene_align or "on").lower() != "off":
+        # Align window boundaries to scene cuts so MMAudio never has to average two unrelated
+        # shots; long scenes are still tiled into <= chunk-second pieces by detect_scenes.
+        windows = detect_scenes(source, duration, chunk, min_len=max(2.0, chunk / 4.0))
+        print(f"Aligned {len(windows)} SFX window(s) to scene cuts.", flush=True)
+    else:
+        count = max(1, int(math.ceil(duration / chunk)))
+        windows = [(i * chunk, min((i + 1) * chunk, duration)) for i in range(count) if duration - i * chunk > 0.05]
+        print(f"Tiling {len(windows)} fixed SFX window(s).", flush=True)
     proxy_dir = work_dir / "sfx_chunks"
     proxy_dir.mkdir(parents=True, exist_ok=True)
-    prompt = (args.sfx_prompt or "").strip() or DEFAULT_SFX_PROMPT
     parts: list[Path] = []
-    for index in range(count):
-        start = index * chunk
-        length = min(chunk, duration - start)
-        if length <= 0.05:
-            break
-        print(f"Preparing SFX proxy chunk {index + 1}/{count}", flush=True)
+    for index, (start, end) in enumerate(windows):
+        length = max(1.0, end - start)
+        if captioner is not None:
+            print(f"Captioning SFX window {index + 1}/{len(windows)}", flush=True)
+        caption = caption_midpoint_frame(
+            ffmpeg, source, start, end, proxy_dir / f"frame_{index:04d}.png", captioner, SFX_CAPTION_QUESTION
+        )
+        if caption:
+            print(f"  window {index + 1} sounds: {caption}", flush=True)
+        prompt = combine_sfx_prompt(caption, args.sfx_prompt)
+        print(f"Preparing SFX proxy chunk {index + 1}/{len(windows)}", flush=True)
         proxy = make_sfx_proxy(ffmpeg, source, start, length, int(args.sfx_short_side), proxy_dir / f"proxy_{index:04d}.mp4")
-        print(f"Generating SFX chunk {index + 1}/{count} (MMAudio, {length:.1f}s)", flush=True)
+        print(f"Generating SFX chunk {index + 1}/{len(windows)} (MMAudio, {length:.1f}s)", flush=True)
         raw = audio_models.run_sfx_chunk(
             args.comfy_url, resolve_path(args.comfy_dir), resolve_path(args.comfy_output_root),
             proxy_video=proxy, prompt=prompt, negative=args.sfx_negative,
@@ -348,10 +429,11 @@ def ensure_music_text_encoder_file(comfy_dir: Path, text_encoder: str) -> None:
     )
 
 
-def signature(args: argparse.Namespace, source: Path) -> dict[str, Any]:
+def signature(args: argparse.Namespace, source: Path, caption_backend: str = "") -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "tool": "create_audio_track.py",
+        "caption_backend": caption_backend,
         "source": root_relative(source),
         "source_fingerprint": file_fingerprint(source),
         "music": bool(args.music),
@@ -366,6 +448,7 @@ def signature(args: argparse.Namespace, source: Path) -> dict[str, Any]:
         "sfx_prompt": args.sfx_prompt,
         "sfx_negative": args.sfx_negative,
         "sfx_chunk_seconds": args.sfx_chunk_seconds,
+        "sfx_scene_align": (args.sfx_scene_align or "on").lower(),
         "sfx_short_side": args.sfx_short_side,
         "sfx_steps": args.sfx_steps,
         "sfx_cfg": args.sfx_cfg,
@@ -383,13 +466,19 @@ def run(args: argparse.Namespace) -> int:
     if not source.exists():
         raise FileNotFoundError(f"Input video not found for soundtrack: {source}")
     output = resolve_path(args.output)
-    sig = signature(args, source)
+    captioner = resolve_captioner(args)
+    caption_backend = captioner[0] if captioner else ""
+    sig = signature(args, source, caption_backend)
     if not args.force and resumable_output(output, sig, video_like=source):
         print(f"Reuse soundtrack video: {output}", flush=True)
         return 0
     if args.dry_run:
         print(f"Would create a soundtrack for {source} -> {output} (music={args.music}, sfx={args.sfx})", flush=True)
         return 0
+    if captioner:
+        print(f"Scene captioning: {caption_backend}", flush=True)
+    else:
+        print("Scene captioning unavailable (no caption node configured and no Ollama vision model found); using prompt hints only.", flush=True)
 
     info = video_info(source)
     duration = float(info["duration"])
@@ -407,8 +496,8 @@ def run(args: argparse.Namespace) -> int:
     work_dir = ROOT / ".cache" / "audio" / safe_stem(source.name)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    music_stem = build_music_stem(args, ffmpeg, source, duration, work_dir) if args.music else None
-    sfx_stem = build_sfx_stem(args, ffmpeg, source, duration, work_dir) if args.sfx else None
+    music_stem = build_music_stem(args, ffmpeg, source, duration, work_dir, captioner) if args.music else None
+    sfx_stem = build_sfx_stem(args, ffmpeg, source, duration, work_dir, captioner) if args.sfx else None
 
     print("Mixing audio stems", flush=True)
     mixed = mix_stems(ffmpeg, music_stem, sfx_stem, float(args.music_gain_db), float(args.sfx_gain_db), work_dir / "mixed.wav")
@@ -439,14 +528,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--music-cfg", type=float, default=6.0)
     parser.add_argument("--sfx-prompt", default="")
     parser.add_argument("--sfx-negative", default="music, song, singing, speech, voice")
-    parser.add_argument("--sfx-chunk-seconds", type=float, default=16.0)
+    parser.add_argument("--sfx-chunk-seconds", type=float, default=8.0)
+    parser.add_argument("--sfx-scene-align", default="on", help="Align SFX windows to scene cuts ('off' tiles fixed windows).")
     parser.add_argument("--sfx-short-side", type=int, default=384)
     parser.add_argument("--sfx-steps", type=int, default=25)
     parser.add_argument("--sfx-cfg", type=float, default=4.5)
     parser.add_argument("--music-gain-db", type=float, default=-9.0)
     parser.add_argument("--sfx-gain-db", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--caption-node", default="", help="ComfyUI node class for local Qwen-VL captioning (optional).")
+    parser.add_argument("--caption-node", default="", help="ComfyUI node class for local Qwen-VL captioning (optional; overrides Ollama).")
+    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="Local Ollama server used for scene captioning.")
+    parser.add_argument(
+        "--ollama-vision-model", default="auto",
+        help="Ollama vision model for scene captions ('auto' picks the first vision-capable model; 'off' disables).",
+    )
     parser.add_argument("--ffmpeg", default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

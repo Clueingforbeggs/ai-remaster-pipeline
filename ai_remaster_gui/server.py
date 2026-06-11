@@ -1128,13 +1128,14 @@ class PipelineApp:
                 add(["--sfx-prompt", values.get("sfx_prompt", "")])
             if values.get("sfx_negative_prompt"):
                 add(["--sfx-negative", values.get("sfx_negative_prompt", "")])
-            add(["--sfx-chunk-seconds", values.get("sfx_chunk_seconds", "16")])
+            add(["--sfx-chunk-seconds", values.get("sfx_chunk_seconds", "8")])
             add(["--sfx-short-side", values.get("sfx_short_side", "384")])
             add(["--music-gain-db", values.get("music_gain_db", "-9")])
             add(["--sfx-gain-db", values.get("sfx_gain_db", "0")])
             add(["--seed", values.get("seed", "42")])
             if values.get("caption_node"):
                 add(["--caption-node", values.get("caption_node", "")])
+            add(["--ollama-vision-model", values.get("ollama_vision_model", "auto")])
         elif stage_key == "upscale":
             source = self.upscale_input_for() or values.get("input_video")
             output = upscale_output_for(source, values) or values.get("output")
@@ -1464,11 +1465,17 @@ class PipelineApp:
         add(["--flashvsr-model", values.get("flashvsr_model", "FlashVSR-v1.1")])
         add(["--flashvsr-mode", values.get("flashvsr_mode", "tiny")])
         add(["--flashvsr-scale", values.get("flashvsr_scale", "2")])
+        add(["--flashvsr-tile-size", values.get("flashvsr_tile_size") or "256"])
+        add(["--flashvsr-tile-overlap", values.get("flashvsr_tile_overlap") or "24"])
+        add(["--flashvsr-local-range", values.get("flashvsr_local_range") or "11"])
+        add(["--flashvsr-sparse-ratio", values.get("flashvsr_sparse_ratio") or "2.0"])
+        add(["--flashvsr-kv-ratio", values.get("flashvsr_kv_ratio") or "3.0"])
         add(["--flashvsr-seed", values.get("flashvsr_seed", "0")])
         add(["--chunk-seconds", values.get("chunk_seconds", "6")])
         add(["--overlap-frames", values.get("overlap_frames", "8")])
         add(["--flashvsr-tiled-vae" if values.get("flashvsr_tiled_vae", "true") == "true" else "--no-flashvsr-tiled-vae"])
         add(["--flashvsr-tiled-dit" if values.get("flashvsr_tiled_dit", "true") == "true" else "--no-flashvsr-tiled-dit"])
+        add(["--flashvsr-color-fix" if values.get("flashvsr_color_fix", "true") == "true" else "--no-flashvsr-color-fix"])
         if values.get("flashvsr_unload_dit", "false") == "true":
             add(["--flashvsr-unload-dit"])
         return [part for part in cmd if part != ""]

@@ -343,7 +343,9 @@ def sfx_prompt_graph(
             "class_type": LOAD_VIDEO_NODE,
             "inputs": {
                 "video": video_name,
-                "force_rate": 0.0,
+                # MMAudio's sampler slices the frame tensor assuming 25 fps (Synchformer's
+                # native rate); resample here so any proxy frame rate is handled.
+                "force_rate": 25.0,
                 "custom_width": 0,
                 "custom_height": 0,
                 "frame_load_cap": 0,
@@ -399,6 +401,54 @@ def run_sfx_chunk(
     prompt_id = queue_prompt(comfy_url, graph)
     history = wait_for_prompt(comfy_url, prompt_id, poll_seconds)
     return newest_output(extract_audio_files(history, comfy_output_root), AUDIO_SUFFIXES, "MMAudio chunk audio")
+
+
+# ── Captioning: local Ollama vision model ─────────────────────────────────────
+
+
+OLLAMA_VISION_HINTS = ("vl", "llava", "vision", "moondream", "minicpm-v", "bakllava")
+
+
+def clean_caption_text(text: str) -> str:
+    text = " ".join(text.split()).strip().strip('"').strip()
+    return text[:300]
+
+
+def pick_ollama_vision_model(url: str) -> str | None:
+    """Name of the first vision-capable model the local Ollama server has pulled, if any."""
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/tags", timeout=5) as response:
+            payload = json.load(response)
+    except Exception:
+        return None
+    for model in payload.get("models", []) or []:
+        name = str(model.get("name", ""))
+        if any(hint in name.lower() for hint in OLLAMA_VISION_HINTS):
+            return name
+    return None
+
+
+def run_ollama_caption(url: str, model: str, *, image_path: Path, question: str, timeout: float = 180.0) -> str:
+    import base64
+    import json
+    import urllib.request
+
+    body = json.dumps({
+        "model": model,
+        "prompt": question,
+        "images": [base64.b64encode(Path(image_path).read_bytes()).decode("ascii")],
+        "stream": False,
+        "options": {"temperature": 0.2, "num_predict": 80},
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}/api/generate", data=body, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.load(response)
+    return clean_caption_text(str(payload.get("response", "")))
 
 
 # ── Captioning: best-effort local Qwen-VL ─────────────────────────────────────

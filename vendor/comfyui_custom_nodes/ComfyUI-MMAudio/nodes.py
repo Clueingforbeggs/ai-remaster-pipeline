@@ -51,46 +51,35 @@ def process_video_tensor(video_tensor: torch.Tensor, duration_sec: float) -> tup
         v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
-    # Assuming video_tensor is in the shape (frames, height, width, channels)
+    # video_tensor is (frames, height, width, channels) with no frame-rate metadata, so
+    # treat the tensor as spanning duration_sec and resample by nearest index to the rates
+    # each branch was trained at (CLIP 8 fps, Synchformer 25 fps). Slicing the first
+    # N frames instead (the previous behaviour) was only correct for 25 fps input, and
+    # always fed CLIP just the first 8/fps of the clip stretched over the whole duration.
     total_frames = video_tensor.shape[0]
-    clip_frames_count = int(_CLIP_FPS * duration_sec)
-    sync_frames_count = int(_SYNC_FPS * duration_sec)
+    # Truncate, don't round: SequenceConfig.clip_seq_len is int(duration * fps), and the
+    # network asserts the feature length matches it exactly (e.g. 6.6s -> 52, not 53).
+    clip_frames_count = max(1, int(_CLIP_FPS * duration_sec))
+    sync_frames_count = max(1, int(_SYNC_FPS * duration_sec))
 
-    # Adjust duration if there are not enough frames
-    if total_frames < clip_frames_count:
-        log.warning(f'Clip video is too short: {total_frames / _CLIP_FPS:.2f} < {duration_sec:.2f}')
-        clip_frames_count = total_frames
-        duration_sec = total_frames / _CLIP_FPS
+    derived_fps = total_frames / duration_sec
+    if derived_fps < _SYNC_FPS:
+        log.warning(
+            f'Video supplies {derived_fps:.2f} fps over {duration_sec:.2f}s; frames will be '
+            f'duplicated to reach Synchformer\'s {_SYNC_FPS:.0f} fps. For best sync provide '
+            f'{_SYNC_FPS:.0f} fps input.'
+        )
 
-    if total_frames < sync_frames_count:
-        log.warning(f'Sync video is too short: {total_frames / _SYNC_FPS:.2f} < {duration_sec:.2f}, truncating to {total_frames / _SYNC_FPS:.2f} sec')
-        sync_frames_count = total_frames
-        duration_sec = total_frames / _SYNC_FPS
-
-    clip_frames = video_tensor[:clip_frames_count]
-    sync_frames = video_tensor[:sync_frames_count]
+    clip_indices = torch.linspace(0, total_frames - 1, clip_frames_count).round().long()
+    sync_indices = torch.linspace(0, total_frames - 1, sync_frames_count).round().long()
+    clip_frames = video_tensor[clip_indices]
+    sync_frames = video_tensor[sync_indices]
 
     clip_frames = clip_frames.permute(0, 3, 1, 2)
     sync_frames = sync_frames.permute(0, 3, 1, 2)
 
     clip_frames = torch.stack([clip_transform(frame) for frame in clip_frames])
     sync_frames = torch.stack([sync_transform(frame) for frame in sync_frames])
-
-    clip_length_sec = clip_frames.shape[0] / _CLIP_FPS
-    sync_length_sec = sync_frames.shape[0] / _SYNC_FPS
-
-    # if clip_length_sec < duration_sec:
-    #     log.warning(f'Clip video is too short: {clip_length_sec:.2f} < {duration_sec:.2f}')
-    #     log.warning(f'Truncating to {clip_length_sec:.2f} sec')
-    #     duration_sec = clip_length_sec
-
-    # if sync_length_sec < duration_sec:
-    #     log.warning(f'Sync video is too short: {sync_length_sec:.2f} < {duration_sec:.2f}')
-    #     log.warning(f'Truncating to {sync_length_sec:.2f} sec')
-    #     duration_sec = sync_length_sec
-
-    clip_frames = clip_frames[:int(_CLIP_FPS * duration_sec)]
-    sync_frames = sync_frames[:int(_SYNC_FPS * duration_sec)]
 
     return clip_frames, sync_frames, duration_sec
 

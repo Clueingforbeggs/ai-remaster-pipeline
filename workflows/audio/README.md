@@ -41,16 +41,32 @@ Plus `ComfyUI-VideoHelperSuite` (already used by outpaint/upscale) for `VHS_Load
 The MMAudio weights (model + VAE + Synchformer + CLIP) auto-download into
 `ComfyUI/models/mmaudio/`. MMAudio analyses a low-resolution proxy — the short side is capped
 at **384px** by default, since higher resolution only increases processing time without
-improving the audio. The default SFX window is **16 seconds**, which is a reasonable starting
-point for a 24 GB GPU; reduce it if VRAM gets tight, or try 20-24 seconds if it runs comfortably.
+improving the audio. The proxy is retimed to **25 fps** (Synchformer's native rate); MMAudio's
+sampler slices frames by count, so other rates would time-warp and truncate the audio.
 
-### Captioning (optional, recommended) — local Qwen-VL
-The music score is mood-matched per scene using a local Qwen-VL caption node. Set the node's
-class name in the Audio tab field **"Qwen-VL caption node (advanced)"** (e.g. a
-`Qwen2_VL`/`QwenVL` captioning node from a vision pack). If the field is left blank or the
-node is unavailable, captioning is skipped and the **Music style hint** (or a sensible
-default) is used for every cue. A `ShowText|pysssss` node, if installed, is used to capture
-the caption text from the graph.
+The default SFX window is **8 seconds** — MMAudio's training length. Longer windows do not
+improve quality: the model generalizes poorly past ~10s and the effects dissolve into vague
+ambience, so resist the urge to raise it to "cover more action". VRAM is rarely the limit at
+these settings.
+
+### Captioning (automatic when available) — local Ollama or a ComfyUI node
+Music cues are mood-matched and SFX windows are sound-matched by captioning a representative
+frame per scene/window. The caption backend is resolved in this order:
+
+1. **A ComfyUI caption node**, if its class name is set in the Audio tab field
+   **"Qwen-VL caption node (advanced)"** (a `ShowText|pysssss` node, if installed, is used to
+   capture the caption text from the graph).
+2. **A local Ollama server** (`http://127.0.0.1:11434`) with any vision-capable model pulled
+   (e.g. `qwen2.5vl`, `llava`, `moondream`) — picked automatically; override with
+   `--ollama-vision-model <name>` or disable with `--ollama-vision-model off`.
+
+If neither is available, captioning is skipped and the **Music style hint** / **Sound effects
+hint** (or sensible defaults) are used for every cue/window. Captions matter most for SFX:
+MMAudio takes its semantics largely from the text prompt, so per-window captions
+("machinery clanking, steam hiss…") track the picture far better than one generic prompt.
+
+SFX windows are aligned to detected scene cuts (and long scenes tiled to the chunk length),
+so a window never straddles two unrelated shots.
 
 ## How the stems are assembled
 - **Music**: scenes are detected from colour-histogram jumps (min/max cue length derived from
