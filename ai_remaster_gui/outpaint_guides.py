@@ -611,6 +611,37 @@ def accept_guide_edit(chunk_index: int, guide_index: int, preview_path: str) -> 
     APP.log.append(f"Accepted edited guide frame {guide_index + 1} for chunk {chunk_index + 1}: {rel(preview)}")
     return {"image": rel(preview), "previous": previous}
 
+def save_guide_paint(chunk_index: int, guide_index: int, image_data: str) -> dict:
+    if not image_data:
+        raise ValueError("No painted image data was provided.")
+    import base64
+
+    payload = image_data.split(",", 1)[1] if "," in image_data else image_data
+    raw = base64.b64decode(payload)
+    manifest, rows, _ = _get_guide_manifest()
+    if chunk_index not in rows:
+        raise IndexError(f"Outpaint chunk not found: {chunk_index + 1}")
+    frames = _parse_guide_frames(rows[chunk_index])
+    if guide_index < 0 or guide_index >= len(frames):
+        raise IndexError(f"Guide frame {guide_index} not found in chunk {chunk_index + 1}")
+    output = _next_guide_edit_output(manifest, chunk_index, guide_index)
+    output.write_bytes(raw)
+    output.with_suffix(output.suffix + ".json").write_text(
+        json.dumps(
+            {
+                "chunk_index": chunk_index,
+                "guide_index": guide_index,
+                "source_image": frames[guide_index].get("image", ""),
+                "instruction": "Manual recolour paint",
+                "output": rel(output),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return accept_guide_edit(chunk_index, guide_index, rel(output))
+
 def revert_guide_edit(chunk_index: int, guide_index: int) -> dict:
     manifest, rows, _ = _get_guide_manifest()
     if chunk_index not in rows:

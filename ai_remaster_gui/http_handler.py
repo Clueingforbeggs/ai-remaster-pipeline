@@ -323,6 +323,13 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 APP.log.append(f"Reference edit revert failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/reference-paint-save":
+            try:
+                result = save_reference_paint(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("image", "")))
+                self.send_json({"ok": True, **result, "state": APP.state("references")})
+            except Exception as exc:
+                APP.log.append(f"Reference paint save failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/export-media":
             try:
                 result = export_media_file(str(data.get("path", "")))
@@ -466,6 +473,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, **result, "state": APP.state("outpaint")})
             except Exception as exc:
                 APP.log.append(f"Guide frame edit revert failed: {exc}")
+                self.send_json({"ok": False, "error": str(exc)})
+        elif parsed.path == "/api/guide-paint-save":
+            try:
+                result = save_guide_paint(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), str(data.get("image", "")))
+                self.send_json({"ok": True, **result, "state": APP.state("outpaint")})
+            except Exception as exc:
+                APP.log.append(f"Guide paint save failed: {exc}")
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/browse":
             try:

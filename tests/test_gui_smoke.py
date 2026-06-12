@@ -836,6 +836,76 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("color_reference", fields)
             self.assertEqual(rows[0]["source_reference"], "bw.png")
 
+    def test_reference_paint_save_installs_painted_image_with_revert_history(self) -> None:
+        import base64
+
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "paint_smoke_refs.csv"
+            original = folder / "color.png"
+            original.write_bytes(b"original image bytes")
+            with manifest.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["enabled", "end", "source_reference", "color_reference", "prompt"])
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "enabled": "true",
+                        "end": "00:00:01.000",
+                        "source_reference": "bw.png",
+                        "color_reference": app.rel(original),
+                        "prompt": "",
+                    }
+                )
+
+            painted = b"\x89PNG\r\n\x1a\npainted pixels"
+            data_url = "data:image/png;base64," + base64.b64encode(painted).decode("ascii")
+            edit_root = app.ROOT / "intermediate" / "outpainted_references_color_edits" / "paint_smoke_refs"
+            try:
+                result = app.save_reference_paint(str(manifest), 0, data_url)
+
+                installed = app.resolve(result["color_reference"])
+                self.assertEqual(installed.read_bytes(), painted)
+                _source, _fields, rows = app.read_manifest_details(manifest)
+                self.assertEqual(rows[0]["color_reference"], result["color_reference"])
+                self.assertEqual(rows[0]["color_reference_previous"], app.rel(original))
+            finally:
+                shutil.rmtree(edit_root, ignore_errors=True)
+
+    def test_guide_paint_save_installs_painted_guide_image(self) -> None:
+        import base64
+
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "paint_smoke_chunks.csv"
+            guides = [{"frame_idx": 0, "strength": 0.7, "image": ""}]
+            outpaint_video.write_chunk_manifest(
+                manifest,
+                [
+                    {
+                        "chunk_index": "0",
+                        "start_frame": "0",
+                        "end_frame": "24",
+                        "guide_frames": json.dumps(guides),
+                    }
+                ],
+            )
+
+            painted = b"\x89PNG\r\n\x1a\npainted guide pixels"
+            data_url = "data:image/png;base64," + base64.b64encode(painted).decode("ascii")
+            edit_root = app.ROOT / "intermediate" / "outpaint_guides" / "paint_smoke_chunks"
+            try:
+                with mock.patch.object(outpaint_guides, "outpaint_chunks_state", return_value={"manifest": str(manifest)}):
+                    result = outpaint_guides.save_guide_paint(0, 0, data_url)
+
+                installed = app.resolve(result["image"])
+                self.assertEqual(installed.read_bytes(), painted)
+                stored = app.read_outpaint_chunk_rows(manifest)[0]
+                frames = outpaint_guides._parse_guide_frames(stored)
+                self.assertEqual(frames[0]["image"], result["image"])
+                self.assertEqual(frames[0]["image_previous"], "")
+            finally:
+                shutil.rmtree(edit_root, ignore_errors=True)
+
     def test_shot_fade_marker_round_trips_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             manifest = Path(tmp_text) / "refs.csv"

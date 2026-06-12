@@ -308,6 +308,32 @@ def revert_reference_edit(manifest_text: str, index: int) -> dict[str, str]:
     APP.log.append(f"Reverted edited colour reference for shot {index + 1}: {previous}")
     return {"color_reference": previous, "previous": current}
 
+def save_reference_paint(manifest_text: str, index: int, image_data: str) -> dict[str, str]:
+    if not image_data:
+        raise ValueError("No painted image data was provided.")
+    import base64
+
+    payload = image_data.split(",", 1)[1] if "," in image_data else image_data
+    raw = base64.b64decode(payload)
+    _manifest, _row, _source, current = reference_row_io(manifest_text, index)
+    output = next_reference_edit_output(manifest_text, index)
+    output.write_bytes(raw)
+    output.with_suffix(output.suffix + ".json").write_text(
+        json.dumps(
+            {
+                "manifest": rel(resolve(manifest_text)),
+                "index": index,
+                "source_image": current,
+                "instruction": "Manual recolour paint",
+                "output": rel(output),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return accept_reference_edit(manifest_text, index, rel(output))
+
 def sam_reference_mask(manifest_text: str, index: int, points: list[dict], width: int, height: int, tolerance: int = 10) -> dict[str, str]:
     _manifest, _row, _source, output = reference_row_io(manifest_text, index)
     source = resolve(output)

@@ -120,6 +120,12 @@ const referenceEditor = {
   preview: '',
   previewPollTimer: null,
   previewPollStartedAt: 0,
+  imageSrc: '',
+  fullCanvas: null,
+  imageScale: 1,
+  paintStrokes: 0,
+  paintUndo: [],
+  lastPaintPoint: null,
 };
 
 function openReferenceEditor(manifest, index) {
@@ -192,6 +198,7 @@ function referenceIcon(name) {
     'brush-subtract': `<svg ${common}><path d="M14 4l6 6-8.5 8.5c-1.2 1.2-3.1 1.2-4.2 0l-1.8-1.8c-1.2-1.2-1.2-3.1 0-4.2L14 4z"/><path d="M13 5l6 6"/><path d="M4 20c1.7.2 3-.2 4-1.2"/>${minus}</svg>`,
     wand: `<svg ${common}><path d="M4 20l10-10"/><path d="M13 5l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3z"/><path d="M18 3v3M20 5h-4M6 5v2M7 6H5"/></svg>`,
     dropper: `<svg ${common}><path d="M14 5l5 5"/><path d="M11 8l5 5-7.5 7.5H4v-4.5L11 8z"/><path d="M13 6l2-2c.8-.8 2.2-.8 3 0l2 2c.8.8.8 2.2 0 3l-2 2"/></svg>`,
+    recolour: `<svg ${common}><path d="M12 4l5 5-7 7c-1 1-2.6 1-3.6 0l-1.4-1.4c-1-1-1-2.6 0-3.6L12 4z"/><path d="M11 5l5 5"/><path d="M19 13.5c1.1 1.5 1.8 2.6 1.8 3.5a1.8 1.8 0 0 1-3.6 0c0-.9.7-2 1.8-3.5z"/></svg>`,
     clear: `<svg ${common}><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v5M14 11v5"/></svg>`,
     invert: `<svg ${common}><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z"/></svg>`,
   };
@@ -233,6 +240,7 @@ function ensureReferenceEditorModal() {
             ${referenceToolButton('sam-subtract', 'SAM2 subtract from mask')}
             ${referenceToolButton('brush-subtract', 'Brush subtract from mask')}
             ${referenceToolButton('dropper', 'Sample colour')}
+            ${referenceToolButton('recolour', 'Recolour brush (paints the sampled colour, keeps texture)')}
           </div>
           <label>Brush size</label>
           <input id="referenceBrushSize" type="range" min="4" max="120" value="28" oninput="referenceEditor.brushSize=Number(this.value)">
@@ -241,6 +249,11 @@ function ensureReferenceEditorModal() {
             ${referenceMaskActionButton('invertReferenceMask()', 'invert', 'Invert mask')}
           </div>
           <div class="sample-row"><span id="referenceSampleSwatch"></span><span id="referenceEditSample">No colour sampled</span></div>
+          <div class="actions">
+            <button type="button" onclick="undoReferencePaint()">Undo stroke</button>
+            <button type="button" onclick="discardReferencePaint()">Discard paint</button>
+            <button class="primary" type="button" onclick="saveReferencePaint()">Save paint</button>
+          </div>
           <label>Recent reference images</label>
           <div id="referenceEditRecent" class="recent-reference-strip"></div>
           <div class="actions">
@@ -273,6 +286,9 @@ function guideRecentHtml(row, guideIndex) {
 }
 
 function closeReferenceEditor() {
+  if (referenceEditor.paintStrokes && !confirm('Discard your unsaved recolour strokes?')) return;
+  referenceEditor.paintStrokes = 0;
+  referenceEditor.paintUndo = [];
   stopReferencePreviewPolling();
   const modal = document.getElementById('referenceEditModal');
   if (modal) modal.classList.add('hidden');
@@ -286,6 +302,7 @@ function stopReferencePreviewPolling() {
 }
 
 function loadReferenceEditorImage(src) {
+  referenceEditor.imageSrc = src;
   const img = new Image();
   img.onload = () => {
     const imageCanvas = document.getElementById('referenceImageCanvas');
@@ -300,6 +317,17 @@ function loadReferenceEditorImage(src) {
       canvas.style.aspectRatio = `${w}/${h}`;
     }
     imageCanvas.getContext('2d').drawImage(img, 0, 0, w, h);
+    // Recolour strokes are painted onto a full-resolution copy too, so saving
+    // never downscales the reference to the display canvas size.
+    const full = document.createElement('canvas');
+    full.width = img.naturalWidth;
+    full.height = img.naturalHeight;
+    full.getContext('2d').drawImage(img, 0, 0);
+    referenceEditor.fullCanvas = full;
+    referenceEditor.imageScale = w / img.naturalWidth;
+    referenceEditor.paintStrokes = 0;
+    referenceEditor.paintUndo = [];
+    referenceEditor.lastPaintPoint = null;
     clearReferenceMask();
   };
   img.src = src;
@@ -309,16 +337,21 @@ function wireReferenceEditorCanvas() {
   const wrap = document.querySelector('.reference-canvas-wrap');
   wrap.addEventListener('pointerdown', event => {
     if (event.button !== 0) return;
+    if (referenceEditor.tool === 'recolour' && referenceEditor.sampledColor) pushReferencePaintUndo();
+    referenceEditor.lastPaintPoint = null;
     referenceEditor.drawing = true;
     handleReferenceCanvasPoint(event);
   });
   wrap.addEventListener('pointermove', event => {
     if (!referenceEditor.drawing) return;
     if ((event.buttons & 1) === 0) return;
-    if (!referenceEditor.tool.startsWith('brush')) return;
+    if (!referenceEditor.tool.startsWith('brush') && referenceEditor.tool !== 'recolour') return;
     handleReferenceCanvasPoint(event);
   });
-  window.addEventListener('pointerup', () => { referenceEditor.drawing = false; });
+  window.addEventListener('pointerup', () => {
+    referenceEditor.drawing = false;
+    referenceEditor.lastPaintPoint = null;
+  });
 }
 
 function setReferenceTool(tool) {
@@ -333,7 +366,13 @@ function setReferenceTool(tool) {
     'brush-subtract': 'Brush subtract from mask',
     wand: 'Magic wand selection',
     dropper: 'Sample colour',
+    recolour: 'Recolour brush',
   };
+  if (tool === 'recolour' && !referenceEditor.sampledColor) {
+    const status = document.getElementById('referenceEditStatus');
+    if (status) status.textContent = 'Recolour brush: sample a colour first with the dropper or a recent image.';
+    return;
+  }
   const status = document.getElementById('referenceEditStatus');
   if (status) status.textContent = `Tool: ${labels[tool] || tool}`;
 }
@@ -352,6 +391,7 @@ function handleReferenceCanvasPoint(event) {
   if (referenceEditor.tool === 'dropper') return sampleActiveReferenceColor(point.x, point.y);
   if (referenceEditor.tool === 'wand') return wandReferenceMask(point.x, point.y, 34);
   if (referenceEditor.tool === 'sam-add' || referenceEditor.tool === 'sam-subtract') return requestReferenceSamMask(point);
+  if (referenceEditor.tool === 'recolour') return paintReferenceRecolour(point.x, point.y);
   drawReferenceBrush(point.x, point.y, referenceEditor.tool === 'brush-subtract');
 }
 
@@ -421,6 +461,175 @@ function setReferenceSample(hex) {
 
 function rgbToHex(r, g, b) {
   return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
+}
+
+function hexToRgb(hex) {
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!match) return null;
+  const value = parseInt(match[1], 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+function colourLuminance(r, g, b) {
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+// Shift a colour to a target luminance while keeping its hue, desaturating
+// towards the luminance grey when a channel would clip (SetLum from the
+// standard "Color" blend mode).
+function setColourLuminance(rgb, lum) {
+  const shift = lum - colourLuminance(rgb[0], rgb[1], rgb[2]);
+  let out = [rgb[0] + shift, rgb[1] + shift, rgb[2] + shift];
+  const lo = Math.min(...out);
+  const hi = Math.max(...out);
+  if (lo < 0) out = out.map(v => lum + (v - lum) * lum / (lum - lo));
+  if (hi > 255) out = out.map(v => lum + (v - lum) * (255 - lum) / (hi - lum));
+  return out.map(v => Math.round(Math.max(0, Math.min(255, v))));
+}
+
+let referenceRecolourLut = { hex: '', lut: null };
+
+function recolourLutFor(hex) {
+  if (referenceRecolourLut.hex === hex && referenceRecolourLut.lut) return referenceRecolourLut.lut;
+  const rgb = hexToRgb(hex);
+  if (!rgb) return null;
+  const lut = new Array(256);
+  for (let lum = 0; lum < 256; lum++) lut[lum] = setColourLuminance(rgb, lum);
+  referenceRecolourLut = { hex, lut };
+  return lut;
+}
+
+function paintReferenceRecolour(x, y) {
+  const status = document.getElementById('referenceEditStatus');
+  if (!referenceEditor.sampledColor) {
+    if (status) status.textContent = 'Recolour brush: sample a colour first with the dropper or a recent image.';
+    return;
+  }
+  const lut = recolourLutFor(referenceEditor.sampledColor);
+  if (!lut) return;
+  const radius = referenceEditor.brushSize / 2;
+  const last = referenceEditor.lastPaintPoint;
+  const points = [];
+  if (last) {
+    const dist = Math.hypot(x - last.x, y - last.y);
+    const step = Math.max(1, radius * 0.45);
+    for (let d = step; d < dist; d += step) {
+      points.push({ x: last.x + (x - last.x) * d / dist, y: last.y + (y - last.y) * d / dist });
+    }
+  }
+  points.push({ x, y });
+  const display = document.getElementById('referenceImageCanvas').getContext('2d');
+  const full = referenceEditor.fullCanvas;
+  const scale = referenceEditor.imageScale || 1;
+  for (const point of points) {
+    applyRecolourStamp(display, point.x, point.y, radius, lut);
+    if (full && scale !== 1) applyRecolourStamp(full.getContext('2d'), point.x / scale, point.y / scale, radius / scale, lut);
+  }
+  referenceEditor.lastPaintPoint = { x, y };
+  if (status) status.textContent = `Recolouring with ${referenceEditor.sampledColor}. Save paint keeps it, Undo removes the last stroke.`;
+}
+
+// Replaces hue/saturation with the sampled colour but keeps each pixel's
+// luminance, so shading and texture survive (like Paint.NET's Recolor tool).
+function applyRecolourStamp(ctx, cx, cy, radius, lut) {
+  const x0 = Math.max(0, Math.floor(cx - radius - 1));
+  const y0 = Math.max(0, Math.floor(cy - radius - 1));
+  const x1 = Math.min(ctx.canvas.width, Math.ceil(cx + radius + 1));
+  const y1 = Math.min(ctx.canvas.height, Math.ceil(cy + radius + 1));
+  if (x1 <= x0 || y1 <= y0) return;
+  const w = x1 - x0;
+  const img = ctx.getImageData(x0, y0, w, y1 - y0);
+  const data = img.data;
+  for (let py = y0; py < y1; py++) {
+    for (let px = x0; px < x1; px++) {
+      const dx = px + 0.5 - cx;
+      const dy = py + 0.5 - cy;
+      const coverage = Math.max(0, Math.min(1, radius + 0.5 - Math.sqrt(dx * dx + dy * dy)));
+      if (coverage <= 0) continue;
+      const i = ((py - y0) * w + (px - x0)) * 4;
+      const tinted = lut[Math.round(colourLuminance(data[i], data[i + 1], data[i + 2]))];
+      data[i] += (tinted[0] - data[i]) * coverage;
+      data[i + 1] += (tinted[1] - data[i + 1]) * coverage;
+      data[i + 2] += (tinted[2] - data[i + 2]) * coverage;
+    }
+  }
+  ctx.putImageData(img, x0, y0);
+}
+
+function pushReferencePaintUndo() {
+  const imageCanvas = document.getElementById('referenceImageCanvas');
+  const full = referenceEditor.fullCanvas;
+  if (!imageCanvas || !full) return;
+  referenceEditor.paintUndo.push({
+    display: imageCanvas.getContext('2d').getImageData(0, 0, imageCanvas.width, imageCanvas.height),
+    full: full.getContext('2d').getImageData(0, 0, full.width, full.height),
+  });
+  if (referenceEditor.paintUndo.length > 8) referenceEditor.paintUndo.shift();
+  referenceEditor.paintStrokes += 1;
+}
+
+function undoReferencePaint() {
+  const status = document.getElementById('referenceEditStatus');
+  const snapshot = referenceEditor.paintUndo.pop();
+  if (!snapshot) {
+    if (status) status.textContent = 'No recolour strokes to undo.';
+    return;
+  }
+  document.getElementById('referenceImageCanvas').getContext('2d').putImageData(snapshot.display, 0, 0);
+  if (referenceEditor.fullCanvas) referenceEditor.fullCanvas.getContext('2d').putImageData(snapshot.full, 0, 0);
+  referenceEditor.paintStrokes = Math.max(0, referenceEditor.paintStrokes - 1);
+  if (status) status.textContent = 'Recolour stroke undone.';
+}
+
+function discardReferencePaint() {
+  if (!referenceEditor.paintStrokes) {
+    const status = document.getElementById('referenceEditStatus');
+    if (status) status.textContent = 'No recolour strokes to discard.';
+    return;
+  }
+  loadReferenceEditorImage(referenceEditor.imageSrc);
+  const status = document.getElementById('referenceEditStatus');
+  if (status) status.textContent = 'Recolour strokes discarded.';
+}
+
+async function saveReferencePaint() {
+  const status = document.getElementById('referenceEditStatus');
+  if (!referenceEditor.paintStrokes || !referenceEditor.fullCanvas) {
+    if (status) status.textContent = 'No recolour strokes to save yet.';
+    return;
+  }
+  if (status) status.textContent = 'Saving painted image...';
+  const image = (referenceEditor.imageScale === 1 ? document.getElementById('referenceImageCanvas') : referenceEditor.fullCanvas).toDataURL('image/png');
+  const result = referenceEditor.mode === 'guide'
+    ? await postJson('/api/guide-paint-save', {
+        chunk_index: referenceEditor.chunkIndex,
+        guide_index: referenceEditor.guideIndex,
+        image,
+      })
+    : await postJson('/api/reference-paint-save', {
+        manifest: referenceEditor.manifest,
+        index: referenceEditor.index,
+        image,
+      });
+  if (!result.ok) {
+    if (status) status.textContent = result.error || 'Could not save painted image';
+    return;
+  }
+  referenceEditor.paintStrokes = 0;
+  referenceEditor.paintUndo = [];
+  if (referenceEditor.mode === 'guide') {
+    if (referenceEditor.guide) {
+      referenceEditor.guide.image = result.image || referenceEditor.guide.image;
+      referenceEditor.guide.image_exists = true;
+    }
+    referenceEditor.guideSourcePath = result.image || referenceEditor.guideSourcePath;
+  } else if (referenceEditor.row) {
+    referenceEditor.row.color_reference = result.color_reference || referenceEditor.row.color_reference;
+  }
+  state = result.state || state;
+  if (status) status.textContent = 'Recolour saved. Revert restores the previous image.';
+  draw(false);
+  lastRenderSignature = renderSignature();
 }
 
 function wandReferenceMask(x, y, tolerance = 34) {
@@ -514,6 +723,10 @@ function referenceMaskDataUrl() {
 
 async function submitReferenceEditPreview() {
   const status = document.getElementById('referenceEditStatus');
+  if (referenceEditor.paintStrokes) {
+    status.textContent = 'Save or discard your recolour strokes first. Qwen edits the saved image, not unsaved paint.';
+    return;
+  }
   status.textContent = 'Starting Qwen edit preview...';
   stopReferencePreviewPolling();
   const mask = referenceMaskDataUrl();
@@ -590,6 +803,8 @@ async function pollReferencePreview(path) {
 
 async function acceptReferenceEditPreview() {
   if (!referenceEditor.preview) return alert('Generate a preview first.');
+  if (referenceEditor.paintStrokes && !confirm('Accepting the Qwen preview discards your unsaved recolour strokes. Continue?')) return;
+  referenceEditor.paintStrokes = 0;
   const result = referenceEditor.mode === 'guide'
     ? await postJson('/api/guide-frame-edit-accept', {
         chunk_index: referenceEditor.chunkIndex,
@@ -609,6 +824,8 @@ async function acceptReferenceEditPreview() {
 }
 
 async function revertReferenceEdit() {
+  if (referenceEditor.paintStrokes && !confirm('Reverting discards your unsaved recolour strokes. Continue?')) return;
+  referenceEditor.paintStrokes = 0;
   const result = referenceEditor.mode === 'guide'
     ? await postJson('/api/guide-frame-edit-revert', {
         chunk_index: referenceEditor.chunkIndex,
