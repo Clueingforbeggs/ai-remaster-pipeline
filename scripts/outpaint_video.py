@@ -19,12 +19,15 @@ from common import (
     find_ffmpeg,
     load_local_config,
     newest_output as newest_comfy_output,
+    replace_unless_identical,
     replace_with_retry,
     resolve_path,
     root_relative,
     resumable_output,
     safe_stem,
+    split_matches_source,
     write_signature,
+    write_split_sidecar,
 )
 from dependency_manager import ensure_outpaint_models
 from prepare_outpaint_input import default_output as default_prepared_output
@@ -164,13 +167,18 @@ def copy_guide_image_to_comfy_input(
     target_dir = comfy_dir / "input" / "arp_outpaint"
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    # Content-keyed name: different guides can share a stem across chunk caches and projects
+    # (e.g. guide_prev_raw_0000_000000_000480.png exists for every project with the same
+    # chunking), so the digest is what stops a cached copy from feeding another guide's
+    # frames to LTX.
+    digest = file_fingerprint(guide)["sha256"][:12]
     if canvas_width > 0 and canvas_height > 0:
-        target = target_dir / f"guide_{guide.stem}_{canvas_width}x{canvas_height}.png"
+        target = target_dir / f"guide_{guide.stem}_{digest}_{canvas_width}x{canvas_height}.png"
     else:
-        target = target_dir / f"guide_{guide.stem}{guide.suffix.lower()}"
+        target = target_dir / f"guide_{guide.stem}_{digest}{guide.suffix.lower()}"
 
     try:
-        if target.exists() and target.stat().st_mtime_ns >= guide.stat().st_mtime_ns and target.stat().st_size > 0:
+        if target.exists() and target.stat().st_size > 0:
             return f"arp_outpaint/{target.name}"
     except OSError:
         pass
@@ -386,6 +394,45 @@ def patch_lightweight_gguf(workflow: dict[str, Any], args) -> None:
     set_widget(text_node, "1", args.text_encoder_checkpoint)
 
 
+def resolve_guide_coords(extra_guides: "list[dict]", num_pixel_frames: int) -> "list[dict]":
+    """Resolve guide frame positions to explicit, collision-free pixel coordinates.
+
+    LTXVAddGuide resolves a negative frame_idx by subtracting the number of keyframes
+    already recorded in the conditioning, but it counts them by UNIQUE start coordinate
+    (torch.unique), so any coordinate collision — two guides at the same position, or a
+    guide landing on the IC-LoRA reference video's internal coordinates {0} ∪ {8m+1} —
+    undercounts and shifts later negative guides past the end of the chunk, where they
+    condition nothing, and makes LTXVCropGuides leave a stray guide latent in the output.
+    Resolving negatives here from the chunk's true frame count, nudging 8m+1 coordinates
+    down onto the free 8m grid, and dropping exact duplicates keeps the node's keyframe
+    accounting exact.  Every skipped or moved guide is logged.
+    """
+    resolved: list[dict] = []
+    seen: set[int] = set()
+    for gf in extra_guides:
+        fidx = int(gf.get("frame_idx", -1))
+        if fidx < 0 and num_pixel_frames <= 0:
+            # Chunk frame count unknown — let the Comfy node resolve the negative index.
+            resolved.append(dict(gf))
+            continue
+        coord = fidx
+        if fidx < 0:
+            latent_count = (num_pixel_frames - 1) // 8 + 1
+            coord = max((latent_count - 1) * 8 + 1 + fidx, 0)
+        if coord > 0 and coord % 8 == 1:
+            print(f"Guide frame_idx={fidx}: moved to frame {coord - 1} (coordinate {coord} collides with IC-LoRA reference conditioning)", flush=True)
+            coord -= 1
+        if coord == 0:
+            print(f"Warning: guide frame_idx={fidx} resolves to frame 0; use the chunk's frame-0 start guide for that position. Skipping it.", flush=True)
+            continue
+        if coord in seen:
+            print(f"Warning: guide frame_idx={fidx} duplicates another guide at frame {coord}; skipping the duplicate.", flush=True)
+            continue
+        seen.add(coord)
+        resolved.append({**gf, "frame_idx": coord})
+    return resolved
+
+
 def _patch_extra_guides(
     workflow: dict[str, Any],
     args,
@@ -393,6 +440,7 @@ def _patch_extra_guides(
     canvas_width: int,
     canvas_height: int,
     source_frame: "Any",
+    num_pixel_frames: int = 0,
 ) -> None:
     """Chain one LTXVAddGuideAdvanced node per extra guide frame.
 
@@ -402,6 +450,10 @@ def _patch_extra_guides(
     """
     from pathlib import Path as _Path
     comfy_dir = _Path(args.comfy_dir)
+
+    extra_guides = resolve_guide_coords(extra_guides, num_pixel_frames)
+    if not extra_guides:
+        return
 
     # Find the VAE source from node 5012's vae input (already resolved by GGUF patching).
     links_map = {lnk[0]: lnk for lnk in workflow.get("links", [])}
@@ -630,7 +682,7 @@ def patch_workflow(args, workflow: dict[str, Any], prepared: Path, comfy_dir: Pa
     # Extra guide frames via LTXVAddGuideAdvanced — inserted after GGUF patching so the VAE
     # source is already resolved.  Each guide is chained off the previous one.
     if extra_guides:
-        _patch_extra_guides(workflow, args, extra_guides, canvas_width, canvas_height, source_frame)
+        _patch_extra_guides(workflow, args, extra_guides, canvas_width, canvas_height, source_frame, int(prepared_info.get("frames") or 0))
 
     return workflow_to_prompt(workflow, args.output_node_id)
 
@@ -655,7 +707,17 @@ def raw_signature(args, workflow_path: Path, prepared: Path, seed: int | None = 
         "guide_image": root_relative(guide_image) if guide_image else "",
         "guide_fingerprint": file_fingerprint(guide_image) if guide_image and guide_image.exists() else None,
         "guide_strength": getattr(args, "guide_strength", 0.7),
-        "extra_guides": [{"frame_idx": g["frame_idx"], "strength": g["strength"], "image": root_relative(g["image"])} for g in (extra_guides or [])],
+        "extra_guides": [
+            {
+                "frame_idx": g["frame_idx"],
+                "strength": g["strength"],
+                "image": root_relative(g["image"]),
+                # Guides regenerated at a stable path (qwen/seed guides) must invalidate the
+                # chunk; the path alone does not change.
+                "image_fingerprint": file_fingerprint(g["image"]),
+            }
+            for g in (extra_guides or [])
+        ],
         "guide_via_i2v_conditioning": bool(guide_image),
         "auto_guide_from_previous_chunk": auto_guide,
         "seed": seed,
@@ -875,6 +937,40 @@ def _guide_frames_from_row(row: dict[str, str]) -> list[dict]:
     return frames
 
 
+def select_chunk_guides(guide_frames_list: "list[dict]", chunk_index: int, chunk_frames: int) -> "tuple[Path | None, float | None, list[dict]]":
+    """Split a chunk's guide_frames into the frame-0 i2v guide and extra guide frames.
+
+    Returns (explicit_guide, explicit_strength, extra_guides); explicit_strength is None
+    when there is no frame-0 guide.  Every skipped guide prints a warning so dropped
+    guides are always visible in the render log: guides with no image set, a missing
+    image file, a position outside the chunk, or a duplicate frame-0 entry.
+    """
+    explicit_guide: Path | None = None
+    explicit_strength: float | None = None
+    extra_guides: list[dict] = []
+    for gf in guide_frames_list:
+        fidx = int(gf.get("frame_idx", 0))
+        if not gf.get("image"):
+            print(f"Warning: chunk {chunk_index + 1} guide (frame_idx={fidx}) has no image set; skipping it.", flush=True)
+            continue
+        img_path = resolve_path(gf.get("image", ""))
+        if not img_path.exists():
+            print(f"Warning: chunk {chunk_index + 1} guide image (frame_idx={fidx}) not found, ignoring: {img_path}", flush=True)
+            continue
+        if chunk_frames > 0 and not (-chunk_frames <= fidx < chunk_frames):
+            print(f"Warning: chunk {chunk_index + 1} guide frame_idx={fidx} is outside the chunk (frames 0-{chunk_frames - 1}); skipping it. Re-position it after changing chunk lengths.", flush=True)
+            continue
+        if fidx == 0:
+            if explicit_guide is not None:
+                print(f"Warning: chunk {chunk_index + 1} has more than one frame-0 guide; keeping the first and skipping the rest.", flush=True)
+                continue
+            explicit_guide = img_path
+            explicit_strength = float(gf.get("strength", 0.7))
+        else:
+            extra_guides.append({"frame_idx": fidx, "strength": float(gf.get("strength", 1.0)), "image": img_path})
+    return explicit_guide, explicit_strength, extra_guides
+
+
 def _occupied_guide_frame_idxs(rows: dict[int, dict[str, str]]) -> dict[int, set[int]]:
     occupied: dict[int, set[int]] = {}
     for chunk_index, row in rows.items():
@@ -933,8 +1029,8 @@ def apply_qwen_seed_guides(args, prepared: Path, ranges: list[tuple[int, int, in
     return read_chunk_manifest(chunk_manifest)
 
 
-def split_chunk(ffmpeg: str, prepared: Path, chunk_path: Path, start_frame: int, end_frame: int, fps: float, force: bool, offset_x: int = 0, offset_y: int = 0) -> None:
-    if chunk_path.exists() and not force:
+def split_chunk(ffmpeg: str, prepared: Path, chunk_path: Path, start_frame: int, end_frame: int, fps: float, force: bool, offset_x: int = 0, offset_y: int = 0, prepared_fingerprint: dict[str, Any] | None = None) -> None:
+    if chunk_path.exists() and not force and (prepared_fingerprint is None or split_matches_source(chunk_path, prepared_fingerprint)):
         return
     chunk_path.parent.mkdir(parents=True, exist_ok=True)
     partial = chunk_path.with_suffix(chunk_path.suffix + ".partial" + chunk_path.suffix)
@@ -957,7 +1053,9 @@ def split_chunk(ffmpeg: str, prepared: Path, chunk_path: Path, start_frame: int,
     else:
         vf = trim
     subprocess.run([ffmpeg, "-y", "-i", str(prepared), "-vf", vf, "-an", "-r", f"{fps:.8f}", "-fps_mode", "cfr", "-c:v", "libx264", "-crf", "12", "-preset", "veryfast", str(partial)], check=True)
-    replace_with_retry(partial, chunk_path, f"Prepared chunk {chunk_path.name}")
+    replace_unless_identical(partial, chunk_path, f"Prepared chunk {chunk_path.name}")
+    if prepared_fingerprint is not None:
+        write_split_sidecar(chunk_path, prepared, prepared_fingerprint)
 
 
 def overlap_context_before_anchor(overlap_frames: int, anchor_seconds: str, fps: float, total_frames: int) -> int:
@@ -1259,6 +1357,7 @@ def main() -> int:
                     f"{RECOMMENDED_OVERLAP_FRAMES}+ overlap frames is recommended to avoid held-frame seams.",
                     flush=True,
                 )
+            base_guide_strength = getattr(args, "guide_strength", 0.7)
             raw_chunks: list[Path] = []
             effective_ranges: list[tuple[int, int, int]] = []
             for range_index, (chunk_index, start_frame, end_frame) in enumerate(ranges):
@@ -1269,7 +1368,7 @@ def main() -> int:
                 chunk_raw = resolve_path(chunk_row.get("raw_path", "")) if chunk_row.get("raw_path") else chunk_dir / f"raw_{chunk_index:04d}_{start_frame:06d}_{end_frame:06d}.mp4"
                 print(f"Outpaint chunk {chunk_index + 1}/{len(ranges)}: frames {start_frame}-{end_frame}", flush=True)
                 force_this_split = args.force and (args.only_chunk is None or chunk_index == args.only_chunk)
-                split_chunk(ffmpeg, prepared, chunk_prepared, start_frame, end_frame, float(prepared_info["fps"] or 24.0), force_this_split, chunk_offset_x, chunk_offset_y)
+                split_chunk(ffmpeg, prepared, chunk_prepared, start_frame, end_frame, float(prepared_info["fps"] or 24.0), force_this_split, chunk_offset_x, chunk_offset_y, raw_sig["prepared_fingerprint"])
                 previous_raw = raw_chunks[-1] if raw_chunks else None
                 chunk_seed = int(chunk_row.get("seed") or args.seed + chunk_index)
                 chunk_prompt_suffix = chunk_row.get("prompt_suffix", "")
@@ -1299,19 +1398,10 @@ def main() -> int:
                         guide_frames_list.append({"frame_idx": -1, "strength": s, "image": chunk_row["guide_end_image"]})
 
                 # Frame-0 guide → i2v path (explicit_guide); others → LTXVAddGuideAdvanced.
-                explicit_guide: Path | None = None
-                extra_guides: list[dict] = []
-                for gf in guide_frames_list:
-                    fidx = int(gf.get("frame_idx", 0))
-                    img_path = resolve_path(gf.get("image", "")) if gf.get("image") else None
-                    if img_path and not img_path.exists():
-                        print(f"Warning: chunk {chunk_index + 1} guide image (frame_idx={fidx}) not found, ignoring: {img_path}", flush=True)
-                        img_path = None
-                    if fidx == 0 and img_path and explicit_guide is None:
-                        explicit_guide = img_path
-                        args.guide_strength = float(gf.get("strength", 0.7))
-                    elif img_path:
-                        extra_guides.append({"frame_idx": fidx, "strength": float(gf.get("strength", 1.0)), "image": img_path})
+                explicit_guide, explicit_strength, extra_guides = select_chunk_guides(guide_frames_list, chunk_index, end_frame - start_frame)
+                # raw_signature and patch_workflow read guide strength off args; reset it each
+                # chunk so a frame-0 guide's strength can't leak into later chunks' auto-guides.
+                args.guide_strength = explicit_strength if explicit_strength is not None else base_guide_strength
 
                 auto_guide: bool = False
                 guide_image: Path | None = explicit_guide

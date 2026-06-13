@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -190,6 +191,17 @@ def project_asset_is_bundleable(path: Path) -> bool:
         return False
     return True
 
+def asset_already_on_disk(info: zipfile.ZipInfo, target: Path) -> bool:
+    """True when the target file already holds the archived bytes. Restoring it anyway would
+    only refresh its mtime, which used to invalidate resume signatures of dependent outputs
+    (e.g. outpaint chunks re-rendering after every project load)."""
+    try:
+        if not target.is_file() or target.stat().st_size != info.file_size:
+            return False
+        return zlib.crc32(target.read_bytes()) == info.CRC
+    except OSError:
+        return False
+
 def extract_project_assets(archive: zipfile.ZipFile) -> None:
     for info in archive.infolist():
         name = info.filename.replace("\\", "/")
@@ -205,6 +217,8 @@ def extract_project_assets(archive: zipfile.ZipFile) -> None:
         # Restore each asset independently so one failure (e.g. a Windows MAX_PATH limit on a
         # deeply nested guide-edit file) can't abort restoring the rest of the project.
         try:
+            if asset_already_on_disk(info, target):
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, target.open("wb") as dest:
                 dest.write(source.read())

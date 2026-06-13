@@ -4,6 +4,7 @@ import copy
 import csv
 import json
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -21,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import comfy_api  # noqa: E402
 import audio_models  # noqa: E402
+import common  # noqa: E402
 import colorize_video  # noqa: E402
 import create_audio_track  # noqa: E402
 import generate_single_reference  # noqa: E402
@@ -35,6 +37,7 @@ import upscale_video  # noqa: E402
 from ai_remaster_gui import app
 from ai_remaster_gui import config
 from ai_remaster_gui import outpaint_guides
+from ai_remaster_gui import project_io
 from ai_remaster_gui import sam_masks
 from ai_remaster_gui import server
 
@@ -1361,6 +1364,163 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn(app.rel(source).replace("\\", "/"), names)
             self.assertIn(app.rel(color).replace("\\", "/"), names)
             self.assertNotIn("openai_api_key", payload["settings"]["references"])
+
+    def test_project_load_skips_assets_already_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            asset = folder / "guide.txt"
+            asset.write_bytes(b"guide bytes")
+            bundle = folder / "demo.arpp"
+            with zipfile.ZipFile(bundle, "w") as archive:
+                archive.writestr(app.rel(asset).replace("\\", "/"), b"guide bytes")
+            first_mtime = asset.stat().st_mtime_ns
+
+            with zipfile.ZipFile(bundle) as archive:
+                project_io.extract_project_assets(archive)
+
+            # Identical content must keep its mtime so resume signatures stay valid.
+            self.assertEqual(asset.stat().st_mtime_ns, first_mtime)
+
+            asset.write_bytes(b"stale bytes")
+            with zipfile.ZipFile(bundle) as archive:
+                project_io.extract_project_assets(archive)
+
+            self.assertEqual(asset.read_bytes(), b"guide bytes")
+
+    def test_signature_match_ignores_fingerprint_mtime_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            output = folder / "chunk.mp4"
+            guide = folder / "guide.png"
+            output.write_bytes(b"rendered")
+            guide.write_bytes(b"guide bytes")
+            signature = {"version": 1, "guide_fingerprint": common.file_fingerprint(guide)}
+            common.write_signature(output, signature)
+
+            touched = copy.deepcopy(signature)
+            touched["guide_fingerprint"]["mtime_ns"] += 1
+            self.assertTrue(common.signature_matches(output, touched))
+
+            changed = copy.deepcopy(signature)
+            changed["guide_fingerprint"]["sha256"] = "0" * 64
+            self.assertFalse(common.signature_matches(output, changed))
+
+    def test_replace_unless_identical_keeps_matching_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            target = folder / "chunk.mp4"
+            target.write_bytes(b"same bytes")
+            first_mtime = target.stat().st_mtime_ns
+            partial = folder / "chunk.mp4.partial.mp4"
+            partial.write_bytes(b"same bytes")
+
+            common.replace_unless_identical(partial, target, "chunk")
+
+            self.assertFalse(partial.exists())
+            self.assertEqual(target.stat().st_mtime_ns, first_mtime)
+
+            partial.write_bytes(b"new bytes!")
+            common.replace_unless_identical(partial, target, "chunk")
+
+            self.assertEqual(target.read_bytes(), b"new bytes!")
+
+    def test_split_video_chunk_resplits_when_source_content_changes(self) -> None:
+        ffmpeg = common.find_ffmpeg()
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "src.mp4"
+            target = folder / "input_0000.mp4"
+
+            def encode_source(colour: str) -> None:
+                subprocess.run(
+                    [ffmpeg, "-y", "-f", "lavfi", "-i", f"color=c={colour}:s=64x64:d=0.5:r=8", "-pix_fmt", "yuv420p", str(source)],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+
+            encode_source("red")
+            fingerprint = common.file_fingerprint(source)
+            upscale_video.split_video_chunk(ffmpeg, source, target, 0, 4, 8.0, False, fingerprint)
+            first = common.file_fingerprint(target)
+
+            # Same source content: the split is fresh and must not be redone.
+            upscale_video.split_video_chunk(ffmpeg, source, target, 0, 4, 8.0, False, fingerprint)
+            self.assertEqual(target.stat().st_mtime_ns, first["mtime_ns"])
+
+            # New content under the same file name must replace the stale chunk input.
+            encode_source("blue")
+            upscale_video.split_video_chunk(ffmpeg, source, target, 0, 4, 8.0, False, common.file_fingerprint(source))
+            self.assertNotEqual(common.file_fingerprint(target)["sha256"], first["sha256"])
+
+    def test_write_manifest_details_skips_identical_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            manifest = Path(tmp_text) / "refs.csv"
+            rows = [{"enabled": "true", "end": "00:00:01.000"}]
+
+            app.write_manifest_details(manifest, "input/example.mp4", ["enabled", "end"], rows)
+            first_mtime = manifest.stat().st_mtime_ns
+            app.write_manifest_details(manifest, "input/example.mp4", ["enabled", "end"], rows)
+
+            self.assertEqual(manifest.stat().st_mtime_ns, first_mtime)
+
+            app.write_manifest_details(manifest, "input/example.mp4", ["enabled", "end"], [{"enabled": "false", "end": "00:00:01.000"}])
+            self.assertIn("false", manifest.read_text(encoding="utf-8"))
+
+    def test_copy_to_comfy_input_replaces_same_size_different_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "prepared_0000.mp4"
+            source.write_bytes(b"metropolis bytes")
+
+            name = common.copy_to_comfy_input(source, folder, "arp_outpaint")
+            target = folder / "input" / Path(name)
+
+            # Another project's same-named, same-sized input must not survive as a stale copy.
+            target.write_bytes(b"baskerville16gtd")
+            common.copy_to_comfy_input(source, folder, "arp_outpaint")
+
+            self.assertEqual(target.read_bytes(), b"metropolis bytes")
+
+    def test_guide_copy_names_are_content_keyed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            metropolis = folder / "metropolis" / "guide_prev_raw_0000.png"
+            baskervilles = folder / "baskervilles" / "guide_prev_raw_0000.png"
+            metropolis.parent.mkdir()
+            baskervilles.parent.mkdir()
+            metropolis.write_bytes(b"metropolis frame")
+            baskervilles.write_bytes(b"baskervilles frame")
+
+            first = outpaint_video.copy_guide_image_to_comfy_input(metropolis, folder)
+            second = outpaint_video.copy_guide_image_to_comfy_input(baskervilles, folder)
+            again = outpaint_video.copy_guide_image_to_comfy_input(metropolis, folder)
+
+            # Same stem, different content: each project keeps its own Comfy input copy.
+            self.assertNotEqual(first, second)
+            self.assertEqual(first, again)
+            self.assertEqual((folder / "input" / Path(first)).read_bytes(), b"metropolis frame")
+            self.assertEqual((folder / "input" / Path(second)).read_bytes(), b"baskervilles frame")
+
+    def test_outpaint_signature_fingerprints_extra_guide_images(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            prepared = folder / "prepared.mp4"
+            workflow = folder / "workflow.json"
+            guide = folder / "extra_guide.png"
+            prepared.write_bytes(b"prepared")
+            workflow.write_bytes(b"{}")
+            guide.write_bytes(b"guide bytes")
+            args = argparse.Namespace(
+                target_aspect="16:9", target_height=480, outpaint_all_black_regions=False,
+                prompt="outpaint", negative_prompt="", guide_strength=0.7,
+                load_video_node_id="5060", save_node_id="5076", extra_save_node_id=["5069"],
+                output_node_id="5076", model_backend="gguf", gguf_model="model.gguf",
+                video_vae="vae.safetensors", outpaint_lora="lora.safetensors",
+                chunk_seconds=20.0, overlap_frames=8,
+            )
+
+            sig = outpaint_video.raw_signature(args, workflow, prepared, extra_guides=[{"frame_idx": 5, "strength": 1.0, "image": guide}])
+
+            self.assertEqual(sig["extra_guides"][0]["image_fingerprint"]["sha256"], common.file_fingerprint(guide)["sha256"])
 
     def test_openai_reference_command_requires_key_and_uses_selected_model(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:

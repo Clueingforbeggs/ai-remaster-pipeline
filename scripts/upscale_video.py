@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from comfy_api import ensure_node_types, extract_output_files, object_info, queue_prompt, wait_for_comfy, wait_for_prompt
-from common import ROOT, copy_to_comfy_input, file_fingerprint, find_ffmpeg, load_local_config, newest_output as newest_comfy_output, replace_with_retry, resolve_path, root_relative, safe_stem, resumable_output, video_info, write_signature
+from common import ROOT, copy_to_comfy_input, file_fingerprint, find_ffmpeg, load_local_config, newest_output as newest_comfy_output, replace_unless_identical, replace_with_retry, resolve_path, root_relative, safe_stem, resumable_output, split_matches_source, video_info, write_signature, write_split_sidecar
 
 
 config = load_local_config()
@@ -231,8 +231,8 @@ def chunk_ranges(total_frames: int, fps: float, chunk_seconds: float, overlap_fr
     return ranges
 
 
-def split_video_chunk(ffmpeg: str, source: Path, target: Path, start_frame: int, end_frame: int, fps: float, force: bool) -> None:
-    if target.exists() and not force:
+def split_video_chunk(ffmpeg: str, source: Path, target: Path, start_frame: int, end_frame: int, fps: float, force: bool, source_fingerprint: dict[str, Any]) -> None:
+    if target.exists() and not force and split_matches_source(target, source_fingerprint):
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     start_seconds = start_frame / fps
@@ -261,7 +261,8 @@ def split_video_chunk(ffmpeg: str, source: Path, target: Path, start_frame: int,
         str(partial),
     ]
     subprocess.run(command, check=True)
-    replace_with_retry(partial, target, f"Upscale prepared chunk {target.name}")
+    replace_unless_identical(partial, target, f"Upscale prepared chunk {target.name}")
+    write_split_sidecar(target, source, source_fingerprint)
 
 
 def normalize_chunk(ffmpeg: str, source: Path, target: Path, width: int, height: int, trim_start: int, force: bool) -> None:
@@ -334,7 +335,7 @@ def stitch_chunks(ffmpeg: str, chunks: list[Path], source: Path, output: Path) -
     replace_with_retry(final_partial, output, "Upscaled output")
 
 
-def chunked_flashvsr_run(args: argparse.Namespace, source: Path, output: Path, output_width: int, output_height: int, info: dict[str, Any]) -> None:
+def chunked_flashvsr_run(args: argparse.Namespace, source: Path, output: Path, output_width: int, output_height: int, info: dict[str, Any], source_fingerprint: dict[str, Any]) -> None:
     ffmpeg = find_ffmpeg(args.ffmpeg)
     fps = args.fps or float(info["fps"])
     ranges = chunk_ranges(int(info["frames"]), fps, args.chunk_seconds, args.overlap_frames)
@@ -369,7 +370,7 @@ def chunked_flashvsr_run(args: argparse.Namespace, source: Path, output: Path, o
         chunk_raw = chunk_dir / f"raw_{index:0{digits}d}_{start_frame:06d}_{end_frame:06d}.mp4"
         chunk_final = chunk_dir / f"final_{index:0{digits}d}_{start_frame:06d}_{end_frame:06d}.mp4"
         print(f"Upscale chunk {index + 1}/{len(ranges)}: frames {start_frame}-{end_frame}, trim {trim_start}", flush=True)
-        split_video_chunk(ffmpeg, source, chunk_input, start_frame, end_frame, fps, args.force)
+        split_video_chunk(ffmpeg, source, chunk_input, start_frame, end_frame, fps, args.force, source_fingerprint)
         chunk_sig = signature(args, chunk_input, output_width, output_height)
         if not args.force and resumable_output(chunk_final, chunk_sig, width=output_width, height=output_height):
             print(f"Reuse upscaled chunk: {chunk_final}", flush=True)
@@ -437,7 +438,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    chunked_flashvsr_run(args, source, output, output_width, output_height, info)
+    chunked_flashvsr_run(args, source, output, output_width, output_height, info, sig["source_fingerprint"])
     write_signature(output, sig)
     print(f"Wrote upscaled video: {output}", flush=True)
     return 0

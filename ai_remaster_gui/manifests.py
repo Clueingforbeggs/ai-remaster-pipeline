@@ -50,13 +50,23 @@ def update_manifest_row(path: Path, index: int, values: dict[str, str]) -> None:
 
 def write_manifest_details(path: Path, source_video: str, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    buffer = io.StringIO(newline="")
+    if source_video:
+        buffer.write(f"# source_video={source_video}\n")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({key: row.get(key, "") for key in fieldnames})
+    text = buffer.getvalue()
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                if handle.read() == text:
+                    return
+        except OSError:
+            pass
     with path.open("w", encoding="utf-8", newline="") as handle:
-        if source_video:
-            handle.write(f"# source_video={source_video}\n")
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({key: row.get(key, "") for key in fieldnames})
+        handle.write(text)
 
 
 def read_outpaint_chunk_rows(path: Path) -> dict[int, dict[str, str]]:

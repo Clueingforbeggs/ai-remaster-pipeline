@@ -78,12 +78,11 @@ function outpaintChunkGuide(row) {
   const lengthFrames = Math.max(1, Number(row.length_frames || 1));
   const fps = Math.max(1, Number(row.fps || 24));
 
-  // Warn about duplicate frame positions (after LTX rounding to multiples of 8)
-  const roundedIdxs = guides.map(g => {
-    const fi = Number(g.frame_idx);
-    return fi < 0 ? fi : (Math.floor(fi / 8) * 8);
-  });
-  const dupIdxs = new Set(roundedIdxs.filter((v, i, a) => a.indexOf(v) !== i));
+  // Warn about duplicate effective positions, mirroring resolve_guide_coords in
+  // outpaint_video.py: negatives resolve from the chunk's latent count, and positions
+  // 1 above a multiple of 8 shift down 1 at render (IC-LoRA coordinate clash).
+  const resolvedIdxs = guides.map(g => resolveGuideCoord(Number(g.frame_idx), lengthFrames));
+  const dupIdxs = new Set(resolvedIdxs.filter((v, i, a) => a.indexOf(v) !== i));
 
   const guideCards = guides.map((g, gi) => guideFrameCard(idx, gi, g, lengthFrames, fps, dupIdxs)).join('');
 
@@ -92,7 +91,7 @@ function outpaintChunkGuide(row) {
     : '';
 
   const tooMany = guides.length > Math.floor(lengthFrames / 8) + 1
-    ? `<p class="shot-time guide-warn">⚠ More guides than valid LTX frame positions — some will overlap after rounding to multiples of 8.</p>`
+    ? `<p class="shot-time guide-warn">⚠ More guides than 8-frame positions in this chunk — duplicate positions are skipped at render.</p>`
     : '';
 
   return `
@@ -103,15 +102,28 @@ function outpaintChunkGuide(row) {
         <button type="button" data-outpaint-disable-running="true"
           onclick="addGuideFrame(${idx})" ${state.running ? 'disabled' : ''}>+ Add Guide Frame</button>
       </div>
-      <p class="shot-time chunk-guide-hint">💡 frame_idx 0 = chunk start (i2v), −1 = last frame (FLF2V), any multiple of 8 in between. Non-multiples are rounded down by LTX.</p>
+      <p class="shot-time chunk-guide-hint">💡 frame_idx 0 = chunk start (i2v), −1 = last frame (FLF2V), multiples of 8 in between. Positions 1 above a multiple of 8 shift down 1 at render; other non-multiples sit between LTX's 8-frame grid and pin less strongly.</p>
     </div>
   `;
+}
+
+function resolveGuideCoord(fi, lengthFrames) {
+  // Mirrors resolve_guide_coords in scripts/outpaint_video.py.
+  let coord = fi;
+  if (fi < 0) {
+    const latentCount = Math.floor((Math.max(1, lengthFrames) - 1) / 8) + 1;
+    coord = Math.max((latentCount - 1) * 8 + 1 + fi, 0);
+  }
+  if (coord > 0 && coord % 8 === 1) coord -= 1;
+  return coord;
 }
 
 function guideFrameLabel(fi, maxFrame) {
   if (fi === 0) return '0 — chunk start (i2v)';
   if (fi >= maxFrame) return `${fi} — last frame (FLF2V)`;
-  return `${fi}${fi % 8 !== 0 ? ' → rounds to ' + Math.floor(fi / 8) * 8 : ''}`;
+  if (fi % 8 === 1) return `${fi} → renders at ${fi - 1}`;
+  if (fi % 8 !== 0) return `${fi} — off the 8-frame grid (weaker)`;
+  return `${fi}`;
 }
 
 function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
@@ -121,8 +133,8 @@ function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
   const fi = rawFi < 0 ? Math.max(0, maxFrame + rawFi + 1) : Math.min(rawFi, maxFrame);
   const strength = Number(g.strength || 0.7);
   const hasImage = !!g.image_exists;
-  const rounded = Math.floor(fi / 8) * 8;
-  const isDup = dupIdxs.has(rounded);
+  const isDup = dupIdxs.has(resolveGuideCoord(rawFi, lengthFrames));
+  const outOfRange = rawFi >= lengthFrames || rawFi < -lengthFrames;
 
   const thumbSrc = hasImage
     ? media(g.image) + (g.image_mtime ? '&t=' + g.image_mtime : '')
@@ -133,9 +145,9 @@ function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
     : `<img id="gfThumb_${chunkIdx}_${guideIdx}" class="pending-thumb" alt="" title="Source preview not ready">`;
 
   return `
-    <div class="chunk-guide guide-frame-card${isDup ? ' guide-frame-dup' : ''}">
+    <div class="chunk-guide guide-frame-card${isDup || outOfRange ? ' guide-frame-dup' : ''}">
       <div>
-        <label>Guide ${guideIdx + 1}${isDup ? ' ⚠ duplicate position' : ''}</label>
+        <label>Guide ${guideIdx + 1}${isDup ? ' ⚠ duplicate position' : ''}${outOfRange ? ' ⚠ beyond chunk end — skipped at render' : ''}</label>
         <figure class="still-figure ${hasImage ? 'has-anchor' : ''}">
           ${thumbHtml}
           ${hasImage ? `<span class="anchor-badge">Guide</span>` : ''}

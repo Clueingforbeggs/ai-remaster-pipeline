@@ -54,12 +54,22 @@ def signature_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".sig.json")
 
 
+def _without_mtime(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_mtime(item) for key, item in value.items() if key != "mtime_ns"}
+    if isinstance(value, list):
+        return [_without_mtime(item) for item in value]
+    return value
+
+
 def signature_matches(path: Path, signature: dict[str, Any]) -> bool:
     sig = signature_path(path)
     if not path.exists() or not sig.exists():
         return False
     try:
-        return json.loads(sig.read_text(encoding="utf-8-sig")) == signature
+        # mtime_ns is recorded for diagnostics but ignored when matching: size+sha256 already
+        # prove content identity, and project load rewrites identical bytes with fresh mtimes.
+        return _without_mtime(json.loads(sig.read_text(encoding="utf-8-sig"))) == _without_mtime(signature)
     except Exception:
         return False
 
@@ -169,7 +179,13 @@ def copy_to_comfy_input(path: Path, comfy_dir: Path, subfolder: str) -> str:
     target_dir = comfy_dir / "input" / subfolder
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / path.name
-    if not target.exists() or target.stat().st_size != path.stat().st_size:
+    # Same-named inputs from other chunk caches/projects collide here, so a matching size
+    # alone is not proof the cached copy holds this file's content.
+    if (
+        not target.exists()
+        or target.stat().st_size != path.stat().st_size
+        or file_fingerprint(target)["sha256"] != file_fingerprint(path)["sha256"]
+    ):
         shutil.copy2(path, target)
     return str(Path(subfolder) / target.name).replace("\\", "/")
 
@@ -198,6 +214,45 @@ def replace_with_retry(source: Path, target: Path, label: str | None = None, att
             if label:
                 print(f"{label} is locked by another process; retrying in {delay:g}s ({attempt + 1}/{attempts})...", flush=True)
             time.sleep(delay)
+
+
+def replace_unless_identical(partial: Path, target: Path, label: str | None = None) -> None:
+    """Promote partial to target, but keep the existing target when the bytes are identical
+    so resume signatures that fingerprint it stay valid."""
+    if target.exists():
+        try:
+            if file_fingerprint(partial)["sha256"] == file_fingerprint(target)["sha256"]:
+                partial.unlink()
+                return
+        except OSError:
+            pass
+    replace_with_retry(partial, target, label)
+
+
+def split_sidecar_path(target: Path) -> Path:
+    return target.with_suffix(target.suffix + ".src.json")
+
+
+def split_matches_source(target: Path, source_fingerprint: dict[str, Any]) -> bool:
+    """True when target was split from a source with this content (size+sha256). Chunk caches
+    are keyed by file name, so a source re-rendered under the same name must invalidate its
+    split files or stale frames get reused by the per-chunk resume signatures."""
+    if not target.exists():
+        return False
+    try:
+        stored = json.loads(split_sidecar_path(target).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    return stored.get("size") == source_fingerprint.get("size") and stored.get("sha256") == source_fingerprint.get("sha256")
+
+
+def write_split_sidecar(target: Path, source: Path, source_fingerprint: dict[str, Any]) -> None:
+    payload = {
+        "source": root_relative(source),
+        "size": source_fingerprint["size"],
+        "sha256": source_fingerprint["sha256"],
+    }
+    split_sidecar_path(target).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def format_time(seconds: float) -> str:
