@@ -62,6 +62,23 @@ def tail_text(path: Path, max_lines: int = 80) -> str:
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return "\n".join(lines[-max_lines:])
 
+def torch_cuda_warning() -> str:
+    try:
+        import torch
+    except Exception as exc:
+        return f"PyTorch could not be imported from ARP's Python environment: {exc}. Re-run install_windows.bat."
+    version = getattr(torch, "__version__", "unknown")
+    cuda_build = getattr(torch.version, "cuda", None)
+    if not cuda_build:
+        return f"ARP's Python environment has a CPU-only PyTorch build ({version}). Re-run install_windows.bat so it can install CUDA PyTorch."
+    try:
+        available = bool(torch.cuda.is_available())
+    except Exception as exc:
+        return f"PyTorch CUDA probe failed for torch {version} / CUDA {cuda_build}: {exc}. Check your NVIDIA driver and rerun install_windows.bat."
+    if not available:
+        return f"PyTorch has CUDA support (torch {version}, CUDA {cuda_build}), but no CUDA device is visible. Check your NVIDIA driver/GPU before running ComfyUI."
+    return ""
+
 def wait_for_comfy_ready(url: str, process: subprocess.Popen | None, timeout_seconds: float = 180.0) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -100,6 +117,9 @@ def start_comfy_if_needed() -> None:
     comfy_dir = Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui")))
     if str(config.get("comfy_managed_by_arp", "true")).lower() != "true":
         startup_log("Using an external ComfyUI checkout. ARP can start it, but install_windows.bat will not update ComfyUI core for this path.")
+    warning = torch_cuda_warning()
+    if warning:
+        startup_log("Warning: " + warning)
     main_py = comfy_dir / "main.py"
     if not main_py.exists():
         if CONFIG_FILE.exists():

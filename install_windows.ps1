@@ -693,6 +693,82 @@ function Install-Pip-WithPyTorchHint {
     }
 }
 
+function Get-PyTorchStatus {
+    $probe = @'
+import json
+try:
+    import torch
+    print(json.dumps({
+        "ok": True,
+        "version": getattr(torch, "__version__", ""),
+        "cuda_build": getattr(torch.version, "cuda", None),
+        "cuda_available": bool(torch.cuda.is_available()),
+    }))
+except Exception as exc:
+    print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+'@
+    $result = Invoke-CapturedProcess -FilePath $PipelinePython -Arguments @('-c', $probe)
+    if ($result.ExitCode -ne 0) {
+        return [pscustomobject]@{
+            Ok = $false
+            Error = (($result.Stderr + "`n" + $result.Stdout).Trim())
+            Version = ''
+            CudaBuild = ''
+            CudaAvailable = $false
+        }
+    }
+    try {
+        $json = $result.Stdout | ConvertFrom-Json
+        return [pscustomobject]@{
+            Ok = [bool]$json.ok
+            Error = [string]$json.error
+            Version = [string]$json.version
+            CudaBuild = [string]$json.cuda_build
+            CudaAvailable = [bool]$json.cuda_available
+        }
+    } catch {
+        return [pscustomobject]@{
+            Ok = $false
+            Error = "Could not parse PyTorch probe output: $($result.Stdout)"
+            Version = ''
+            CudaBuild = ''
+            CudaAvailable = $false
+        }
+    }
+}
+
+function Install-PyTorch-Cuda {
+    Write-Host "Installing PyTorch CUDA packages from $TorchIndexUrl"
+    Install-Pip-WithPyTorchHint @('--upgrade', '--force-reinstall', 'torch', 'torchvision', 'torchaudio', '--index-url', $TorchIndexUrl)
+}
+
+function Ensure-PyTorch-Cuda {
+    $status = Get-PyTorchStatus
+    if (-not $status.Ok) {
+        Write-Host "PyTorch is not importable yet: $($status.Error)" -ForegroundColor Yellow
+        Install-PyTorch-Cuda
+        $status = Get-PyTorchStatus
+    } elseif ([string]::IsNullOrWhiteSpace($status.CudaBuild)) {
+        Write-Host "Existing PyTorch is CPU-only: torch $($status.Version)." -ForegroundColor Yellow
+        Write-Host 'Replacing it with a CUDA build so ComfyUI can start on NVIDIA systems.' -ForegroundColor Yellow
+        Install-PyTorch-Cuda
+        $status = Get-PyTorchStatus
+    } else {
+        Write-Host "PyTorch CUDA build found: torch $($status.Version), CUDA $($status.CudaBuild)"
+    }
+
+    if (-not $status.Ok) {
+        throw "PyTorch still cannot be imported after installation: $($status.Error)"
+    }
+    if ([string]::IsNullOrWhiteSpace($status.CudaBuild)) {
+        throw "PyTorch installed successfully, but it is still a CPU-only build. Delete '$Root\.venv' and rerun install_windows.bat. Current torch: $($status.Version)"
+    }
+    if (-not $status.CudaAvailable) {
+        throw "PyTorch has a CUDA build (torch $($status.Version), CUDA $($status.CudaBuild)), but torch.cuda.is_available() is false. Install or update your NVIDIA driver, then rerun install_windows.bat."
+    }
+    Write-Host "PyTorch CUDA check passed: torch $($status.Version), CUDA $($status.CudaBuild)"
+}
+
 function Install-PythonBuildTools {
     Install-Pip @('--upgrade', 'pip', 'wheel')
 }
@@ -832,7 +908,7 @@ Invoke-Step 'Create ai-remaster-pipeline venv' {
 }
 
 Invoke-Step 'Install PyTorch CUDA and ComfyUI requirements' {
-    Install-Pip-WithPyTorchHint @('torch', 'torchvision', 'torchaudio', '--index-url', $TorchIndexUrl)
+    Ensure-PyTorch-Cuda
     Install-RequirementsIfPresent (Join-Path $ComfyDir 'requirements.txt')
     Install-Pip @('huggingface_hub[cli]', 'opencv-contrib-python', 'imageio-ffmpeg', 'pillow', 'numpy', 'numba')
 }
