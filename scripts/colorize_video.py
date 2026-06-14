@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import artifact_ids as aid
 from comfy_api import ensure_node_types, extract_output_files, queue_prompt, wait_for_comfy, wait_for_prompt
 from common import (
     ROOT,
@@ -64,8 +65,14 @@ def method_suffix(method: str) -> str:
     return "colormnet" if method == "colormnet" else "deepexemplar"
 
 
-def default_output(source_video: Path, method: str) -> Path:
-    return ROOT / "intermediate" / "outpainted_colorized" / f"{safe_stem(source_video.name)}_{method_suffix(method)}_colorized.mp4"
+def default_output(manifest: Path, manifest_source: str | None, method: str) -> Path:
+    # Match the artifact name the GUI locates by (references.colorized_output_for_manifest), so the
+    # method="both" path — the only path that reaches default_output, since single methods get an
+    # explicit --output — writes files the UI can find. The old "<stem>_<method>_colorized.mp4" name
+    # drifted from the artifact-id scheme and left "both" outputs invisible to the GUI.
+    ident = aid.colorized_identity(manifest.stem, method)
+    name_src = Path(manifest_source).name if manifest_source else manifest.name
+    return ROOT / "intermediate" / "outpainted_colorized" / aid.artifact_name(aid.source_word(name_src), "color", ident, "mp4")
 
 
 def reference_signature(row: dict[str, str]) -> dict[str, Any]:
@@ -498,7 +505,7 @@ def run(args: argparse.Namespace) -> int:
     source_video = resolve_path(args.source_video or source_from_manifest or "")
     if not source_video.exists():
         raise FileNotFoundError(f"Source video not found for colourisation: {source_video}")
-    output = resolve_path(args.output) if args.output else default_output(source_video, args.method)
+    output = resolve_path(args.output) if args.output else default_output(manifest, source_from_manifest, args.method)
     sig = signature(args, manifest, source_video, rows)
     if not args.force and resumable_output(output, sig, video_like=source_video):
         print(f"Reuse colorized video: {output}", flush=True)
