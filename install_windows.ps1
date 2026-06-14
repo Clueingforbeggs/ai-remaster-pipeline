@@ -17,6 +17,7 @@ $DefaultComfyDir = Join-Path $Root 'tools\comfyui'
 $PipelinePython = Join-Path $Root '.venv\Scripts\python.exe'
 $BundledCustomNodes = Join-Path $Root 'vendor\comfyui_custom_nodes'
 $UseExistingComfy = $false
+$ComfyManagedByArp = $true
 $ResolvedPythonLauncher = $null
 
 function Get-ArpVersion {
@@ -524,49 +525,15 @@ function Resolve-ComfyInstallMode {
         }
     }
 
-    if ($NonInteractive) {
-        return @{
-            Dir = [System.IO.Path]::GetFullPath($DefaultComfyDir)
-            Existing = $false
-        }
-    }
-
     Write-Host ''
     Write-Host 'ComfyUI setup' -ForegroundColor Cyan
-    Write-Host '1. Clone ComfyUI into this project under tools\comfyui'
-    Write-Host '2. Use an existing ComfyUI directory'
-    $choice = Read-Choice 'Choose ComfyUI setup mode (1 or 2)' @('1', '2') '1'
+    Write-Host "Using ARP-managed ComfyUI at: $DefaultComfyDir"
+    Write-Host 'This is the lowest-maintenance path: rerunning install_windows.bat refreshes ComfyUI and required custom nodes.'
+    Write-Host 'If you need an external checkout, rerun with: install_windows.bat -ComfyDir C:\Path\To\ComfyUI'
 
-    if ($choice -eq '1') {
-        $target = Read-Host "Clone destination [$DefaultComfyDir]"
-        if ([string]::IsNullOrWhiteSpace($target)) {
-            $target = $DefaultComfyDir
-        }
-        return @{
-            Dir = [System.IO.Path]::GetFullPath($target)
-            Existing = $false
-        }
-    }
-
-    while ($true) {
-        $target = Read-Host 'Existing ComfyUI directory'
-        if ([string]::IsNullOrWhiteSpace($target)) {
-            Write-Host 'Please enter a ComfyUI directory.' -ForegroundColor Yellow
-            continue
-        }
-        $full = [System.IO.Path]::GetFullPath($target)
-        $resolved = Resolve-ComfyDirPath $full
-        if ($resolved) {
-            return @{
-                Dir = $resolved
-                Existing = $true
-            }
-        }
-        Write-Host "That does not look like a ComfyUI checkout because main.py was not found in $full or $full\ComfyUI." -ForegroundColor Yellow
-        $retry = Read-Choice 'Try another path? (Y/N)' @('Y', 'N') 'Y'
-        if ($retry -eq 'N') {
-            throw 'Install cancelled.'
-        }
+    return @{
+        Dir = [System.IO.Path]::GetFullPath($DefaultComfyDir)
+        Existing = $false
     }
 }
 
@@ -623,7 +590,11 @@ function Copy-BundledCustomNode-IfMissing {
         return $false
     }
     if (Test-Path -LiteralPath $Destination) {
-        return $true
+        $existing = Get-ChildItem -LiteralPath $Destination -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($existing) {
+            return $true
+        }
+        Remove-Item -LiteralPath $Destination -Force
     }
     Ensure-Directory (Split-Path -Parent $Destination)
     Write-Host "Installing bundled custom node: $Name"
@@ -638,13 +609,23 @@ function Install-CustomNodePackage {
         [string]$Destination,
         [switch]$UpdateExisting
     )
-    if (Copy-BundledCustomNode-IfMissing $Name $Destination) {
+    if (Test-Path -LiteralPath $Destination) {
+        if ($UpdateExisting) {
+            Git-Clone-IfMissing $Repo $Destination -UpdateExisting
+        } else {
+            Git-Clone-IfMissing $Repo $Destination
+        }
         return
     }
-    if ($UpdateExisting) {
-        Git-Clone-IfMissing $Repo $Destination -UpdateExisting
-    } else {
+
+    try {
         Git-Clone-IfMissing $Repo $Destination
+    } catch {
+        Write-Host "WARNING: Could not clone $Name from $Repo." -ForegroundColor Yellow
+        Write-Host "  Falling back to the bundled copy if one is available. Details: $_" -ForegroundColor Yellow
+        if (-not (Copy-BundledCustomNode-IfMissing $Name $Destination)) {
+            throw
+        }
     }
 }
 
@@ -789,13 +770,16 @@ function Download-HfFile {
 $mode = Resolve-ComfyInstallMode
 $ComfyDir = $mode.Dir
 $UseExistingComfy = [bool]$mode.Existing
+$ComfyManagedByArp = -not $UseExistingComfy
 $CustomNodes = Join-Path $ComfyDir 'custom_nodes'
 
 Invoke-Step 'Configure ComfyUI directory' {
     if ($UseExistingComfy) {
         Write-Host "Using existing ComfyUI: $ComfyDir"
+        Write-Host 'ARP will refresh required custom nodes, but will not update this external ComfyUI checkout.'
+        Write-Host 'Keep it current yourself with git pull and pip install -r requirements.txt.'
     } else {
-        Git-Clone-IfMissing 'https://github.com/comfyanonymous/ComfyUI.git' $ComfyDir
+        Git-Clone-IfMissing 'https://github.com/comfyanonymous/ComfyUI.git' $ComfyDir -UpdateExisting
     }
     if (-not (Test-ComfyDir $ComfyDir)) {
         throw "ComfyUI main.py was not found in: $ComfyDir"
@@ -856,7 +840,7 @@ Invoke-Step 'Install PyTorch CUDA and ComfyUI requirements' {
 Invoke-Step 'Install ComfyUI custom nodes' {
     Ensure-Directory $CustomNodes
     if (-not $SkipComfyManager) {
-        Git-Clone-IfMissing 'https://github.com/ltdrdata/ComfyUI-Manager.git' (Join-Path $CustomNodes 'ComfyUI-Manager')
+        Git-Clone-IfMissing 'https://github.com/ltdrdata/ComfyUI-Manager.git' (Join-Path $CustomNodes 'ComfyUI-Manager') -UpdateExisting
     }
     Install-CustomNodePackage 'ComfyUI-LTXVideo' 'https://github.com/Lightricks/ComfyUI-LTXVideo.git' (Join-Path $CustomNodes 'ComfyUI-LTXVideo') -UpdateExisting
     Install-CustomNodePackage 'ComfyUI-GGUF' 'https://github.com/city96/ComfyUI-GGUF.git' (Join-Path $CustomNodes 'ComfyUI-GGUF') -UpdateExisting
@@ -980,6 +964,7 @@ Invoke-Step 'Write local ARP configuration' {
         comfy_url = 'http://127.0.0.1:8188'
         comfy_host = '127.0.0.1'
         comfy_port = '8188'
+        comfy_managed_by_arp = if ($ComfyManagedByArp) { 'true' } else { 'false' }
     }
     $configPath = Join-Path $Root '.ai_remaster_config.json'
     ($config | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $configPath -Encoding UTF8

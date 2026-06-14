@@ -92,7 +92,7 @@ function logFileSettingsHtml() {
   return `
     <h3>Log file</h3>
     <div class="row">
-      <input id="comfyLog" placeholder="path/to/comfy.log">
+      <input id="comfyLog" value="output/logs/comfyui-startup.log" placeholder="path/to/comfy.log">
       <button onclick="loadLogFile()">Load</button>
     </div>
     <pre class="log" id="comfyLogText"></pre>

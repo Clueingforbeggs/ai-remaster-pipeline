@@ -36,6 +36,7 @@ import upscale_video  # noqa: E402
 
 from ai_remaster_gui import app
 from ai_remaster_gui import config
+from ai_remaster_gui import lifecycle
 from ai_remaster_gui import outpaint_guides
 from ai_remaster_gui import project_io
 from ai_remaster_gui import sam_masks
@@ -48,9 +49,11 @@ class GuiSmokeTests(unittest.TestCase):
         # Default the soundtrack phase off so stage-order / upscale-chaining tests are not
         # affected by whatever add_soundtrack happens to be in the loaded settings.
         app.APP.settings.setdefault("global", {})["add_soundtrack"] = "false"
+        app.APP.quitting = False
 
     def tearDown(self) -> None:
         app.APP.settings = self._settings
+        app.APP.quitting = False
 
     def test_source_resolver_accepts_ascii_pipe_for_full_width_pipe_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
@@ -238,6 +241,64 @@ class GuiSmokeTests(unittest.TestCase):
             (inner / "main.py").write_text("# comfy\n", encoding="utf-8")
 
             self.assertEqual(config.resolve_comfy_dir(str(portable)), inner)
+
+    def test_comfy_startup_tail_reports_recent_log_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            log_path = Path(tmp_text) / "comfyui-startup.log"
+            log_path.write_text("\n".join(f"line {index}" for index in range(120)), encoding="utf-8")
+
+            with mock.patch.object(lifecycle, "COMFY_STARTUP_LOG", log_path):
+                tail = lifecycle.tail_text(lifecycle.comfy_startup_log_path(), max_lines=3)
+
+        self.assertEqual(tail.splitlines(), ["line 117", "line 118", "line 119"])
+
+    def test_start_comfy_opens_console_window_and_records_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            root = Path(tmp_text)
+            comfy = root / "tools" / "comfyui"
+            comfy.mkdir(parents=True)
+            (comfy / "main.py").write_text("# comfy\n", encoding="utf-8")
+            log_path = root / "output" / "logs" / "comfyui-startup.log"
+
+            class FakeProcess:
+                returncode = None
+
+                def poll(self):
+                    return None
+
+            popen_calls: list[tuple[list[str], dict]] = []
+
+            def fake_popen(command, **kwargs):
+                popen_calls.append((command, kwargs))
+                return FakeProcess()
+
+            with (
+                mock.patch.object(lifecycle, "STARTED_COMFY_PROCESS", None),
+                mock.patch.object(lifecycle, "COMFY_STARTUP_LOG", log_path),
+                mock.patch.object(lifecycle, "current_config", return_value={
+                    "comfy_dir": str(comfy),
+                    "comfy_url": "http://127.0.0.1:8188",
+                    "comfy_host": "127.0.0.1",
+                    "comfy_port": "8188",
+                    "comfy_managed_by_arp": "true",
+                }),
+                mock.patch.object(lifecycle, "discover_comfy_instances", return_value=[]),
+                mock.patch.object(lifecycle.subprocess, "Popen", side_effect=fake_popen),
+                mock.patch.object(lifecycle.threading.Thread, "start", lambda _self: None),
+            ):
+                lifecycle.start_comfy_if_needed()
+
+            self.assertEqual(len(popen_calls), 1)
+            _command, kwargs = popen_calls[0]
+            self.assertEqual(kwargs["cwd"], str(comfy))
+            # ComfyUI runs in its own visible console window, so its output must NOT be redirected
+            # away to a file (that would blank the window). Only the launch banner is recorded.
+            self.assertNotIn("stdout", kwargs)
+            self.assertNotIn("stderr", kwargs)
+            if os.name == "nt":
+                self.assertTrue(kwargs["creationflags"] & subprocess.CREATE_NEW_CONSOLE)
+            self.assertTrue(log_path.exists())
+            self.assertIn("Starting ComfyUI:", log_path.read_text(encoding="utf-8"))
 
     def test_required_comfy_workflows_are_bundled(self) -> None:
         outpaint = app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json"

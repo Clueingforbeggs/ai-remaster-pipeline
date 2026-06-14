@@ -15,6 +15,7 @@ from .config import CONFIG_FILE, ROOT, current_config
 from .http_handler import Handler
 
 STARTED_COMFY_PROCESS: subprocess.Popen | None = None
+COMFY_STARTUP_LOG = ROOT / "output" / "logs" / "comfyui-startup.log"
 
 
 def bind_context(context: dict) -> None:
@@ -52,6 +53,15 @@ def startup_log(message: str) -> None:
     if app is not None:
         app.log.append(message)
 
+def comfy_startup_log_path() -> Path:
+    return COMFY_STARTUP_LOG
+
+def tail_text(path: Path, max_lines: int = 80) -> str:
+    if not path.exists():
+        return ""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-max_lines:])
+
 def wait_for_comfy_ready(url: str, process: subprocess.Popen | None, timeout_seconds: float = 180.0) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -60,9 +70,11 @@ def wait_for_comfy_ready(url: str, process: subprocess.Popen | None, timeout_sec
             return True
         if process and process.poll() is not None:
             startup_log(f"ComfyUI exited before it became ready. Exit code: {process.returncode}")
+            startup_log("Check the ComfyUI console window for the error.")
             return False
         time.sleep(2)
     startup_log(f"Timed out waiting for ComfyUI to become ready at {url}")
+    startup_log("Check the ComfyUI console window for details.")
     return False
 
 def monitor_comfy_startup(url: str, process: subprocess.Popen | None) -> None:
@@ -86,6 +98,8 @@ def start_comfy_if_needed() -> None:
             startup_log(f"ComfyUI appears to be running at {instances[0]}, but ARP is configured for {url}. Close it or update .ai_remaster_config.json.")
         return
     comfy_dir = Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui")))
+    if str(config.get("comfy_managed_by_arp", "true")).lower() != "true":
+        startup_log("Using an external ComfyUI checkout. ARP can start it, but install_windows.bat will not update ComfyUI core for this path.")
     main_py = comfy_dir / "main.py"
     if not main_py.exists():
         if CONFIG_FILE.exists():
@@ -98,13 +112,26 @@ def start_comfy_if_needed() -> None:
     host = config.get("comfy_host", "127.0.0.1")
     port = str(config.get("comfy_port", "8188"))
     command = [sys.executable, "main.py", "--listen", host, "--port", port]
+    log_path = comfy_startup_log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        log.write("\n" + "=" * 72 + "\n")
+        log.write(f"Starting ComfyUI: {' '.join(command)}\n")
+        log.write(f"Working directory: {comfy_dir}\n")
+        log.flush()
+    # Launch ComfyUI in its own console window so its live progress (model load, sampling /
+    # progress bars) is visible — writing straight to that console keeps the bars as in-place
+    # updates. We deliberately do NOT redirect stdout/stderr to a file: that would capture the log
+    # but blank out the window, which is the experience we want back. The banner above records the
+    # launch command for the GUI's log-file viewer. CREATE_NEW_PROCESS_GROUP scopes our taskkill to
+    # that tree on shutdown.
     kwargs: dict = {"cwd": str(comfy_dir)}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     STARTED_COMFY_PROCESS = subprocess.Popen(command, **kwargs)
-    startup_log(f"Started ComfyUI in a new process at {url}")
+    startup_log(f"Started ComfyUI in a new console window at {url}")
     startup_log("ComfyUI is still starting; the pipeline will wait before queueing prompts.")
     threading.Thread(target=monitor_comfy_startup, args=(url, STARTED_COMFY_PROCESS), daemon=True).start()
 

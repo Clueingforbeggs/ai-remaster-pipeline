@@ -32,6 +32,7 @@ def load_config() -> dict[str, str]:
         "comfy_url": "http://127.0.0.1:8188",
         "comfy_host": "127.0.0.1",
         "comfy_port": "8188",
+        "comfy_managed_by_arp": "true",
     }
     if CONFIG_FILE.exists():
         try:

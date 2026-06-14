@@ -29,7 +29,7 @@ The app is still alpha software, but the goal is simple: you should be able to r
 
 - Windows with an NVIDIA GPU is the currently supported installer path. The installer defaults to CUDA 12.8 PyTorch wheels.
 - Python 3.13 is required. On Windows, install it from [python.org](https://www.python.org/downloads/) with the Python Launcher option enabled, or make sure `python.exe` is on `PATH`.
-- Git is required so the installer can clone ComfyUI, and as a fallback if bundled custom nodes need to be refreshed from upstream.
+- Git is required so the installer can clone and update ARP's managed ComfyUI runtime and required custom nodes.
 - Internet access is required during installation for Python packages, ComfyUI, FFmpeg, and optional model downloads.
 - ComfyUI is required as the AI backend. The installer can clone it for you, or you can point ARP at an existing ComfyUI checkout.
 
@@ -41,7 +41,9 @@ Run:
 install_windows.bat
 ```
 
-The installer creates this repo's `.venv`, installs FFmpeg locally, and asks whether to clone ComfyUI into `tools\comfyui` or use an existing ComfyUI directory.
+The installer creates this repo's `.venv`, installs FFmpeg locally, and uses an ARP-managed ComfyUI checkout at `tools\comfyui`.
+
+That managed checkout is the recommended path. Re-running `install_windows.bat` refreshes ComfyUI and the required custom nodes with fast-forward Git updates, while preserving downloaded models and generated outputs.
 
 If the installer cannot find Python 3.13, it will prompt you to install it and retry detection.
 
@@ -52,13 +54,15 @@ install_windows.bat -PythonLauncher "%LocalAppData%\Programs\Python\Python313\py
 install_windows.bat -PythonLauncher "C:\Program Files\Python313\python.exe"
 ```
 
-If you already have ComfyUI somewhere else:
+If you intentionally want to use an existing ComfyUI checkout instead:
 
 ```bat
 install_windows.bat -ComfyDir D:\path\to\ComfyUI
 ```
 
-Python packages are installed into ARP's `.venv`, not into your ComfyUI virtual environment. ComfyUI itself is used as the AI backend.
+When you pass `-ComfyDir`, ARP treats that checkout as external: it can install/update required custom nodes there, but it will not update ComfyUI core itself. Keep external ComfyUI checkouts current yourself with `git pull` and `pip install -r requirements.txt`.
+
+Python packages are installed into ARP's `.venv`, not into a separate ComfyUI virtual environment. The managed ComfyUI checkout is used as the AI backend.
 
 Models and LoRAs are downloaded on demand when a stage first needs them. If a large Hugging Face download is interrupted, rerun the same stage and the download should resume. You can prefetch the main model set with:
 
@@ -102,7 +106,9 @@ Or from an activated environment:
 python -m ai_remaster_gui
 ```
 
-The GUI opens as a local web app. It checks ComfyUI at `http://127.0.0.1:8188`; if ComfyUI is configured but not running, ARP can start it in a separate process/window.
+The GUI opens as a local web app. It checks ComfyUI at `http://127.0.0.1:8188`; if ComfyUI is configured but not running, ARP can start it in its own console window so you can watch ComfyUI load and render in real time.
+
+ComfyUI runs in that separate console window, where its startup, progress, and any import/custom-node errors are visible live. ARP also records the launch command to `output/logs/comfyui-startup.log` (viewable from Settings → Log file).
 
 Set `AI_REMASTER_NO_COMFY_AUTOSTART=1` if you want to manage ComfyUI yourself.
 
