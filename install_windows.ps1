@@ -510,35 +510,56 @@ function Read-Choice {
 Write-ArpBanner
 
 function Resolve-ComfyInstallMode {
+    Write-Host ''
+    Write-Host 'ComfyUI setup' -ForegroundColor Cyan
     if ($ComfyDir) {
         $full = [System.IO.Path]::GetFullPath($ComfyDir)
         $resolved = Resolve-ComfyDirPath $full
         if ($resolved) {
+            Write-Host "Using ComfyUI from -ComfyDir: $resolved"
             return @{
                 Dir = $resolved
                 Existing = $true
             }
         }
+        Write-Host "Using ComfyUI target from -ComfyDir: $full"
         return @{
             Dir = $full
             Existing = $false
         }
     }
 
-    Write-Host ''
-    Write-Host 'ComfyUI setup' -ForegroundColor Cyan
-    Write-Host "Using ARP-managed ComfyUI at: $DefaultComfyDir"
+    $selected = [System.IO.Path]::GetFullPath($DefaultComfyDir)
+    if (-not $NonInteractive) {
+        Write-Host 'Choose where ARP should find or install ComfyUI.'
+        Write-Host "Press Enter for the ARP-managed default: $selected"
+        $answer = Read-Host 'ComfyUI directory'
+        if (-not [string]::IsNullOrWhiteSpace($answer)) {
+            $selected = [System.IO.Path]::GetFullPath($answer.Trim())
+        }
+    }
+
+    $resolvedSelected = Resolve-ComfyDirPath $selected
+    if ($resolvedSelected) {
+        Write-Host "Using existing ComfyUI at: $resolvedSelected"
+        return @{
+            Dir = $resolvedSelected
+            Existing = $true
+        }
+    }
+
+    Write-Host "Using ARP-managed ComfyUI target: $selected"
     Write-Host 'This is the lowest-maintenance path: rerunning install_windows.bat refreshes ComfyUI and required custom nodes.'
     Write-Host 'If you need an external checkout, rerun with: install_windows.bat -ComfyDir C:\Path\To\ComfyUI'
 
     return @{
-        Dir = [System.IO.Path]::GetFullPath($DefaultComfyDir)
+        Dir = $selected
         Existing = $false
     }
 }
 
 function Git-Clone-IfMissing {
-    param([string]$Repo, [string]$Destination, [switch]$UpdateExisting)
+    param([string]$Repo, [string]$Destination, [switch]$UpdateExisting, [switch]$RequireComfyMain)
     if (Test-Path -LiteralPath $Destination) {
         if ($UpdateExisting) {
             if (Test-Path -LiteralPath (Join-Path $Destination '.git')) {
@@ -557,21 +578,26 @@ function Git-Clone-IfMissing {
                 Write-Host "WARNING: '$Destination' exists but is not a Git checkout." -ForegroundColor Yellow
                 Write-Host "  It was probably installed by extracting a zip download, which cannot be updated automatically." -ForegroundColor Yellow
                 Write-Host "  Some required node types may be missing or outdated." -ForegroundColor Yellow
+                if ($RequireComfyMain -and -not (Test-ComfyDir $Destination)) {
+                    Write-Host "  This folder is not a usable ComfyUI install because main.py is missing." -ForegroundColor Yellow
+                    Write-Host "  ARP cannot continue unless this folder is replaced or you pass -ComfyDir with a valid ComfyUI checkout." -ForegroundColor Yellow
+                }
                 Write-Host ""
-                Write-Host "  Option: rename the existing folder to '$Destination.bak' and clone a fresh" -ForegroundColor Cyan
-                Write-Host "  copy from: $Repo" -ForegroundColor Cyan
+                Write-Host "  Option: replace the existing folder with a fresh clone from:" -ForegroundColor Cyan
+                Write-Host "  $Repo" -ForegroundColor Cyan
                 Write-Host ""
-                $answer = Read-Host "  Replace it with a fresh Git clone? [Y/N]"
+                if ($NonInteractive) {
+                    throw "Cannot update '$Destination' because it is not a Git checkout. Rename or delete it, then rerun install_windows.bat."
+                }
+                $answer = Read-Choice "  Replace it with a fresh Git clone?" @('Y', 'N') 'Y'
                 if ($answer -match '^[Yy]') {
-                    $backup = "$Destination.bak"
-                    if (Test-Path -LiteralPath $backup) {
-                        Write-Host "  Removing previous backup: $backup" -ForegroundColor Yellow
-                        Remove-Item -LiteralPath $backup -Recurse -Force
-                    }
-                    Rename-Item -LiteralPath $Destination -NewName ([System.IO.Path]::GetFileName($backup))
+                    Remove-Item -LiteralPath $Destination -Recurse -Force
                     Invoke-External -Command @('git', 'clone', $Repo, $Destination)
                 } else {
-                    Write-Host "  Skipping. If you see missing-node errors, delete '$Destination' and rerun install_windows.bat." -ForegroundColor Yellow
+                    if ($RequireComfyMain -and -not (Test-ComfyDir $Destination)) {
+                        throw "Install cancelled because '$Destination' is not a usable ComfyUI checkout. Rerun install_windows.bat and choose Y, or pass -ComfyDir with a valid ComfyUI checkout."
+                    }
+                    Write-Host "  Skipping. If you see missing-node errors, rename or delete '$Destination' and rerun install_windows.bat." -ForegroundColor Yellow
                 }
             }
         } else {
@@ -694,6 +720,8 @@ function Install-Pip-WithPyTorchHint {
 }
 
 function Get-PyTorchStatus {
+    $probeName = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetRandomFileName(), '.py')
+    $probePath = Join-Path ([System.IO.Path]::GetTempPath()) $probeName
     $probe = @'
 import json
 try:
@@ -707,7 +735,12 @@ try:
 except Exception as exc:
     print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
 '@
-    $result = Invoke-CapturedProcess -FilePath $PipelinePython -Arguments @('-c', $probe)
+    Set-Content -LiteralPath $probePath -Value $probe -Encoding UTF8
+    try {
+        $result = Invoke-CapturedProcess -FilePath $PipelinePython -Arguments @($probePath)
+    } finally {
+        Remove-Item -LiteralPath $probePath -Force -ErrorAction SilentlyContinue
+    }
     if ($result.ExitCode -ne 0) {
         return [pscustomobject]@{
             Ok = $false
@@ -855,7 +888,7 @@ Invoke-Step 'Configure ComfyUI directory' {
         Write-Host 'ARP will refresh required custom nodes, but will not update this external ComfyUI checkout.'
         Write-Host 'Keep it current yourself with git pull and pip install -r requirements.txt.'
     } else {
-        Git-Clone-IfMissing 'https://github.com/comfyanonymous/ComfyUI.git' $ComfyDir -UpdateExisting
+        Git-Clone-IfMissing 'https://github.com/comfyanonymous/ComfyUI.git' $ComfyDir -UpdateExisting -RequireComfyMain
     }
     if (-not (Test-ComfyDir $ComfyDir)) {
         throw "ComfyUI main.py was not found in: $ComfyDir"
