@@ -18,7 +18,12 @@ def first_int_after(text: str, marker: str) -> int:
 
 
 def download_progress_percent(text: str) -> int | None:
-    latest: int | None = None
+    status = download_progress_status(text)
+    return int(status["percent"]) if status else None
+
+
+def download_progress_status(text: str) -> dict[str, str | int] | None:
+    latest: dict[str, str | int] | None = None
     marker = "Download progress:"
     for line in text.splitlines():
         if marker not in line:
@@ -26,10 +31,24 @@ def download_progress_percent(text: str) -> int | None:
         tail = line.split(marker, 1)[1].strip()
         value = tail.split("%", 1)[0].strip()
         try:
-            latest = max(0, min(100, int(value)))
+            percent = max(0, min(100, int(value)))
         except ValueError:
-            pass
+            continue
+        status: dict[str, str | int] = {"percent": percent}
+        after_percent = tail.split("%", 1)[1].strip() if "%" in tail else ""
+        eta_marker = "ETA "
+        if eta_marker in after_percent:
+            eta = after_percent.split(eta_marker, 1)[1].strip().strip(".,")
+            if eta:
+                status["eta"] = eta
+        latest = status
     return latest
+
+
+def download_eta_label(status: dict[str, str | int] | None) -> str:
+    if status and status.get("eta"):
+        return f", ETA {status['eta']}"
+    return ""
 
 
 def outpaint_chunk_progress(text: str) -> dict[str, int]:

@@ -109,17 +109,17 @@ def ensure_hf_models(comfy_dir: Path, models: list[HfModel], required: bool = Tr
     not abort the whole stage.
     """
     ensure_huggingface_hub()
-    from huggingface_hub import hf_hub_download, hf_hub_url
-    import urllib.request
 
     cache_root = ROOT / ".cache" / "huggingface"
     cache_root.mkdir(parents=True, exist_ok=True)
     old_python_utf8 = os.environ.get("PYTHONUTF8")
     old_python_io = os.environ.get("PYTHONIOENCODING")
     old_progress = os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS")
+    old_symlink_warning = os.environ.get("HF_HUB_DISABLE_SYMLINKS_WARNING")
     os.environ["PYTHONUTF8"] = "1"
     os.environ["PYTHONIOENCODING"] = "utf-8"
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
     try:
         for model in models:
             destination = comfy_dir / model.destination
@@ -149,6 +149,7 @@ def ensure_hf_models(comfy_dir: Path, models: list[HfModel], required: bool = Tr
         restore_env("PYTHONUTF8", old_python_utf8)
         restore_env("PYTHONIOENCODING", old_python_io)
         restore_env("HF_HUB_DISABLE_PROGRESS_BARS", old_progress)
+        restore_env("HF_HUB_DISABLE_SYMLINKS_WARNING", old_symlink_warning)
 
 
 def restore_env(name: str, value: str | None) -> None:
@@ -160,6 +161,18 @@ def restore_env(name: str, value: str | None) -> None:
 
 def remote_file_size(repo: str, filename: str) -> int:
     try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo_id=repo, files_metadata=True)
+        for sibling in info.siblings or []:
+            if sibling.rfilename == filename and sibling.size:
+                return int(sibling.size)
+    except Exception:
+        pass
+
+    try:
+        from huggingface_hub import hf_hub_url
+
         request = urllib.request.Request(hf_hub_url(repo, filename), method="HEAD")
         with urllib.request.urlopen(request, timeout=10) as response:
             length = response.headers.get("Content-Length")
@@ -192,10 +205,7 @@ def download_hf_file(repo: str, filename: str, cache_root: Path, total_size: int
         )
         progress_thread.start()
     try:
-        try:
-            downloaded = Path(hf_hub_download(**kwargs, resume_download=True))
-        except TypeError:
-            downloaded = Path(hf_hub_download(**kwargs))
+        downloaded = Path(hf_hub_download(**kwargs))
         if total_size > 0:
             print("Download progress: 100%", flush=True)
         return downloaded
@@ -220,14 +230,38 @@ def cache_file_sizes(cache_root: Path) -> dict[Path, int]:
 
 def report_hf_download_progress(cache_root: Path, total_size: int, baseline: dict[Path, int], stop: threading.Event) -> None:
     last_percent = -1
+    started_at = time.monotonic()
     while not stop.wait(2):
         downloaded = estimate_downloaded_bytes(cache_root, baseline)
         if downloaded <= 0:
             continue
         percent = max(0, min(99, int((downloaded / total_size) * 100)))
         if percent > last_percent:
-            print(f"Download progress: {percent}%", flush=True)
+            eta = download_eta(started_at, downloaded, total_size)
+            eta_text = f", ETA {eta}" if eta else ""
+            print(f"Download progress: {percent}%{eta_text}", flush=True)
             last_percent = percent
+
+
+def download_eta(started_at: float, downloaded: int, total_size: int) -> str:
+    elapsed = max(0.0, time.monotonic() - started_at)
+    if elapsed <= 0 or downloaded <= 0 or downloaded >= total_size:
+        return ""
+    bytes_per_second = downloaded / elapsed
+    if bytes_per_second <= 0:
+        return ""
+    remaining = max(0.0, (total_size - downloaded) / bytes_per_second)
+    return format_duration(remaining)
+
+
+def format_duration(seconds: float) -> str:
+    total = int(round(seconds))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
 
 
 def estimate_downloaded_bytes(cache_root: Path, baseline: dict[Path, int]) -> int:

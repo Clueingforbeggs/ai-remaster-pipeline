@@ -2551,7 +2551,7 @@ class GuiSmokeTests(unittest.TestCase):
         app.APP.log = [
             "Checking model: repo/model.safetensors",
             "Downloading model: repo/model.safetensors (4.0 GB)",
-            "Download progress: 42%",
+            "Download progress: 42%, ETA 3:15",
         ]
 
         try:
@@ -2562,9 +2562,35 @@ class GuiSmokeTests(unittest.TestCase):
             app.APP.run_started_at = 0.0
             app.APP.log = original_log
 
-        self.assertEqual(progress["label"], "Downloading model 42%")
+        self.assertEqual(progress["label"], "Downloading model 42%, ETA 3:15")
         self.assertGreater(progress["percent"], 10)
         self.assertLess(progress["percent"], 35)
+
+    def test_reference_regeneration_model_download_progress_surfaces_eta(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "references"
+        app.APP.running_stage = "Reference Generation"
+        app.APP.running_reference_index = 0
+        app.APP.run_started_at = time.time() - 30
+        app.APP.log = [
+            "Qwen mode: gguf; one source image only; extra references are converted to text guidance when enabled.",
+            "Checking model: unsloth/Qwen-Image-Edit-2511-GGUF/qwen-image-edit-2511-Q4_K_M.gguf",
+            "Downloading model: unsloth/Qwen-Image-Edit-2511-GGUF/qwen-image-edit-2511-Q4_K_M.gguf (18.2 GB)",
+            "Download progress: 7%, ETA 12:04",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.running_reference_index = None
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "Downloading model 7%, ETA 12:04")
+        self.assertGreater(progress["percent"], 5)
+        self.assertLess(progress["percent"], 30)
 
     def test_reference_progress_ignores_previous_stage_writes(self) -> None:
         original_log = app.APP.log
