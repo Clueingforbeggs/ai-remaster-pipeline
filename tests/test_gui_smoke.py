@@ -577,6 +577,9 @@ class GuiSmokeTests(unittest.TestCase):
             with self.subTest(value=value), mock.patch.dict(os.environ, {"COLORMNET_INSTALL_CORRELATION_EXTENSION": value}, clear=True):
                 self.assertTrue(module.optional_correlation_install_enabled())
 
+        self.assertTrue(module.cuda_versions_match("13.0", "13.0"))
+        self.assertFalse(module.cuda_versions_match("12.4", "13.0"))
+
     def test_single_reference_rejects_missing_source_before_qwen_startup(self) -> None:
         with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
             missing = Path(tmp_text) / "missing.png"
@@ -2539,6 +2542,29 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(progress["label"], "Upscale chunks complete, stitching")
         self.assertLess(progress["percent"], 100)
+
+    def test_model_download_progress_surfaces_percent(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "outpaint"
+        app.APP.running_stage = "Outpainting"
+        app.APP.run_started_at = time.time() - 30
+        app.APP.log = [
+            "Checking model: repo/model.safetensors",
+            "Downloading model: repo/model.safetensors (4.0 GB)",
+            "Download progress: 42%",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "Downloading model 42%")
+        self.assertGreater(progress["percent"], 10)
+        self.assertLess(progress["percent"], 35)
 
     def test_reference_progress_ignores_previous_stage_writes(self) -> None:
         original_log = app.APP.log

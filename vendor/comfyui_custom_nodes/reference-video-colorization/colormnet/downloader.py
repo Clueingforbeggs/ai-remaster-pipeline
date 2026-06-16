@@ -4,6 +4,7 @@ import sys
 import subprocess
 import importlib
 import os
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 import urllib.request
@@ -151,6 +152,7 @@ def check_cuda_requirements() -> Tuple[bool, str]:
         Tuple of (requirements_met, feedback_message)
     """
     issues = []
+    toolkit_cuda = None
 
     # Check CUDA_HOME
     cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
@@ -165,6 +167,9 @@ def check_cuda_requirements() -> Tuple[bool, str]:
             issues.append(f"❌ nvcc not found at {nvcc_path}")
         else:
             print(f"[ColorMNet] ✓ nvcc found")
+            toolkit_cuda = cuda_toolkit_version(nvcc_path)
+            if toolkit_cuda:
+                print(f"[ColorMNet] ✓ CUDA Toolkit {toolkit_cuda}")
 
     # Check for Visual Studio C++ compiler
     try:
@@ -180,6 +185,8 @@ def check_cuda_requirements() -> Tuple[bool, str]:
             issues.append("❌ PyTorch CUDA not available")
         else:
             print(f"[ColorMNet] ✓ PyTorch CUDA {torch.version.cuda}")
+            if toolkit_cuda and torch.version.cuda and not cuda_versions_match(toolkit_cuda, torch.version.cuda):
+                issues.append(f"❌ CUDA Toolkit {toolkit_cuda} does not match PyTorch CUDA {torch.version.cuda}")
     except ImportError:
         issues.append("❌ PyTorch not installed")
 
@@ -212,6 +219,26 @@ def check_cuda_requirements() -> Tuple[bool, str]:
         return False, feedback
 
     return True, "[ColorMNet] ✓ All CUDA requirements met"
+
+
+def cuda_toolkit_version(nvcc_path: Path) -> Optional[str]:
+    try:
+        result = subprocess.run([str(nvcc_path), "--version"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    match = re.search(r"release\s+(\d+\.\d+)", result.stdout + "\n" + result.stderr)
+    return match.group(1) if match else None
+
+
+def cuda_versions_match(toolkit_cuda: str, torch_cuda: str) -> bool:
+    return cuda_major_minor(toolkit_cuda) == cuda_major_minor(torch_cuda)
+
+
+def cuda_major_minor(version: str) -> Optional[Tuple[int, int]]:
+    match = re.match(r"^\s*(\d+)\.(\d+)", version)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def try_install_correlation_sampler() -> Tuple[bool, str]:
@@ -324,15 +351,10 @@ def ensure_dependencies() -> bool:
         print("[ColorMNet] ✓ Pytorch-Correlation-extension available")
     except (ImportError, SyntaxError):
         if optional_correlation_install_enabled():
-            print("[ColorMNet] Pytorch-Correlation-extension not found, installing...")
-            print("[ColorMNet] Note: This may require C++ compiler on Windows")
-            installed = install_git_dependency(
-                "https://github.com/ClementPinard/Pytorch-Correlation-extension.git",
-                "Pytorch-Correlation-extension"
-            )
+            print("[ColorMNet] Pytorch-Correlation-extension not found; optional install requested")
+            installed, _ = try_install_correlation_sampler()
             if not installed:
-                print("[ColorMNet] ⚠ Pytorch-Correlation-extension failed (may work without it)")
-                # Don't set all_ok to False - this is optional
+                print("[ColorMNet] ⚠ Pytorch-Correlation-extension unavailable; using fallback implementation")
         else:
             print("[ColorMNet] Pytorch-Correlation-extension not found; using fallback implementation")
             print("[ColorMNet] Set COLORMNET_INSTALL_CORRELATION_EXTENSION=1 to try building the optional CUDA extension")

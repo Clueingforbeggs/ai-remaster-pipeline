@@ -16,6 +16,22 @@ def first_int_after(text: str, marker: str) -> int:
                     return 0
     return 0
 
+
+def download_progress_percent(text: str) -> int | None:
+    latest: int | None = None
+    marker = "Download progress:"
+    for line in text.splitlines():
+        if marker not in line:
+            continue
+        tail = line.split(marker, 1)[1].strip()
+        value = tail.split("%", 1)[0].strip()
+        try:
+            latest = max(0, min(100, int(value)))
+        except ValueError:
+            pass
+    return latest
+
+
 def outpaint_chunk_progress(text: str) -> dict[str, int]:
     done = count_lines_matching(text, ("Wrote raw Comfy chunk", "Reuse raw Comfy chunk"))
     total = 0

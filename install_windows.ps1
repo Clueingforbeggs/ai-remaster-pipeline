@@ -19,6 +19,7 @@ $BundledCustomNodes = Join-Path $Root 'vendor\comfyui_custom_nodes'
 $UseExistingComfy = $false
 $ComfyManagedByArp = $true
 $ResolvedPythonLauncher = $null
+$PythonLauncherFailures = @()
 
 function Get-ArpVersion {
     $versionPath = Join-Path $Root 'VERSION'
@@ -374,13 +375,14 @@ function Get-PythonLauncherCheck {
 
 function Find-PythonLauncher {
     param([array]$Candidates)
+    $script:PythonLauncherFailures = @()
     foreach ($candidate in $candidates) {
         $check = Get-PythonLauncherCheck $candidate
         if ($check.Success) {
             Write-Host "Using Python launcher: $($candidate -join ' ')"
             return $candidate
         }
-        Write-Host "Skipping Python launcher $($candidate -join ' '): $($check.Reason)" -ForegroundColor DarkGray
+        $script:PythonLauncherFailures += "  $($candidate -join ' '): $($check.Reason)"
     }
     return $null
 }
@@ -400,6 +402,12 @@ function Show-PythonInstallPrompt {
     Write-Host ''
     Write-Host 'Python 3.13 is required before ARP can create its virtual environment.' -ForegroundColor Yellow
     Write-Host "The installer looked for Python 3.13 with: $candidateText"
+    if ($script:PythonLauncherFailures.Count -gt 0) {
+        Write-Host 'Detection details:' -ForegroundColor Yellow
+        foreach ($failure in $script:PythonLauncherFailures) {
+            Write-Host $failure -ForegroundColor Yellow
+        }
+    }
     Write-Host 'Install Python 3.13 from https://www.python.org/downloads/'
     Write-Host 'On Windows, enable the Python Launcher option or add python.exe to PATH.'
     Write-Host 'After installing Python 3.13, press R to retry. Press Q to quit.'
@@ -609,22 +617,22 @@ function Git-Clone-IfMissing {
     Invoke-External -Command @('git', 'clone', $Repo, $Destination)
 }
 
-function Copy-BundledCustomNode-IfMissing {
-    param([string]$Name, [string]$Destination)
+function Copy-BundledCustomNode {
+    param([string]$Name, [string]$Destination, [switch]$UpdateExisting)
     $source = Join-Path $BundledCustomNodes $Name
     if (-not (Test-Path -LiteralPath $source -PathType Container)) {
         return $false
     }
     if (Test-Path -LiteralPath $Destination) {
         $existing = Get-ChildItem -LiteralPath $Destination -Force -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($existing) {
+        if ($existing -and -not $UpdateExisting) {
             return $true
         }
-        Remove-Item -LiteralPath $Destination -Force
+    } else {
+        Ensure-Directory $Destination
     }
-    Ensure-Directory (Split-Path -Parent $Destination)
     Write-Host "Installing bundled custom node: $Name"
-    Copy-Item -LiteralPath $source -Destination $Destination -Recurse
+    Get-ChildItem -LiteralPath $source -Force | Copy-Item -Destination $Destination -Recurse -Force
     return $true
 }
 
@@ -633,8 +641,13 @@ function Install-CustomNodePackage {
         [string]$Name,
         [string]$Repo,
         [string]$Destination,
-        [switch]$UpdateExisting
+        [switch]$UpdateExisting,
+        [switch]$PreferBundled
     )
+    if ($PreferBundled -and (Copy-BundledCustomNode $Name $Destination -UpdateExisting:$UpdateExisting)) {
+        return
+    }
+
     if (Test-Path -LiteralPath $Destination) {
         if ($UpdateExisting) {
             Git-Clone-IfMissing $Repo $Destination -UpdateExisting
@@ -649,7 +662,7 @@ function Install-CustomNodePackage {
     } catch {
         Write-Host "WARNING: Could not clone $Name from $Repo." -ForegroundColor Yellow
         Write-Host "  Falling back to the bundled copy if one is available. Details: $_" -ForegroundColor Yellow
-        if (-not (Copy-BundledCustomNode-IfMissing $Name $Destination)) {
+        if (-not (Copy-BundledCustomNode $Name $Destination)) {
             throw
         }
     }
@@ -775,7 +788,88 @@ function Install-PyTorch-Cuda {
     Install-Pip-WithPyTorchHint @('--upgrade', '--force-reinstall', 'torch', 'torchvision', 'torchaudio', '--index-url', $TorchIndexUrl)
 }
 
+function Get-DesiredTorchCudaBuild {
+    $match = [regex]::Match($TorchIndexUrl, 'cu(\d{2,3})(?:\D|$)')
+    if (-not $match.Success) {
+        return ''
+    }
+    $tag = $match.Groups[1].Value
+    if ($tag.Length -eq 3) {
+        return "$($tag.Substring(0, 2)).$($tag.Substring(2, 1))"
+    }
+    if ($tag.Length -eq 2) {
+        return "$($tag.Substring(0, 1)).$($tag.Substring(1, 1))"
+    }
+    return ''
+}
+
+function Install-CorrelationExtension-BestEffort {
+    Write-Host 'Installing optional Pytorch-Correlation-extension for optimized ColorMNet.'
+    Write-Host 'If local CUDA/MSVC build tools are missing or mismatched, ARP will continue with the PyTorch fallback.'
+    $readiness = Test-CorrelationExtensionBuildReady
+    if (-not $readiness.Ready) {
+        Write-Host "WARNING: Skipping Pytorch-Correlation-extension build: $($readiness.Reason)" -ForegroundColor Yellow
+        Write-Host '  ColorMNet will use its PyTorch fallback path. Quality is unchanged.' -ForegroundColor Yellow
+        return
+    }
+    try {
+        Install-Pip @('git+https://github.com/ClementPinard/Pytorch-Correlation-extension.git', '--no-build-isolation')
+        Write-Host 'Pytorch-Correlation-extension installed.'
+    } catch {
+        Write-Host 'WARNING: Pytorch-Correlation-extension could not be built. Continuing with ColorMNet fallback mode.' -ForegroundColor Yellow
+        Write-Host '  Quality is unchanged; only ColorMNet performance may be lower.' -ForegroundColor Yellow
+        Write-Host '  For optimized mode, install a CUDA Toolkit matching PyTorch CUDA plus Visual Studio C++ Build Tools, then rerun install_windows.bat.' -ForegroundColor Yellow
+        Write-Host "  Details: $_" -ForegroundColor Yellow
+    }
+}
+
+function Test-CorrelationExtensionBuildReady {
+    $cl = Get-Command 'cl.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $cl) {
+        return [pscustomobject]@{ Ready = $false; Reason = 'Visual Studio C++ compiler cl.exe was not found on PATH.' }
+    }
+
+    $cudaHome = $env:CUDA_HOME
+    if ([string]::IsNullOrWhiteSpace($cudaHome)) {
+        $cudaHome = $env:CUDA_PATH
+    }
+    if ([string]::IsNullOrWhiteSpace($cudaHome)) {
+        return [pscustomobject]@{ Ready = $false; Reason = 'CUDA_HOME/CUDA_PATH is not set.' }
+    }
+
+    $nvcc = Join-Path $cudaHome 'bin\nvcc.exe'
+    if (-not (Test-Path -LiteralPath $nvcc)) {
+        return [pscustomobject]@{ Ready = $false; Reason = "nvcc.exe was not found at $nvcc." }
+    }
+
+    $toolkitVersion = Get-CudaToolkitVersion $nvcc
+    $torchStatus = Get-PyTorchStatus
+    if (-not $torchStatus.Ok) {
+        return [pscustomobject]@{ Ready = $false; Reason = "PyTorch is not importable: $($torchStatus.Error)" }
+    }
+    if ($toolkitVersion -and $torchStatus.CudaBuild -and ($toolkitVersion -ne $torchStatus.CudaBuild)) {
+        return [pscustomobject]@{ Ready = $false; Reason = "CUDA Toolkit $toolkitVersion does not match PyTorch CUDA $($torchStatus.CudaBuild)." }
+    }
+
+    return [pscustomobject]@{ Ready = $true; Reason = 'CUDA/MSVC build tools found.' }
+}
+
+function Get-CudaToolkitVersion {
+    param([string]$NvccPath)
+    try {
+        $output = (& $NvccPath --version 2>&1) -join "`n"
+        $match = [regex]::Match($output, 'release\s+(\d+\.\d+)')
+        if ($match.Success) {
+            return $match.Groups[1].Value
+        }
+    } catch {
+        return $null
+    }
+    return $null
+}
+
 function Ensure-PyTorch-Cuda {
+    $desiredCudaBuild = Get-DesiredTorchCudaBuild
     $status = Get-PyTorchStatus
     if (-not $status.Ok) {
         Write-Host "PyTorch is not importable yet: $($status.Error)" -ForegroundColor Yellow
@@ -784,6 +878,11 @@ function Ensure-PyTorch-Cuda {
     } elseif ([string]::IsNullOrWhiteSpace($status.CudaBuild)) {
         Write-Host "Existing PyTorch is CPU-only: torch $($status.Version)." -ForegroundColor Yellow
         Write-Host 'Replacing it with a CUDA build so ComfyUI can start on NVIDIA systems.' -ForegroundColor Yellow
+        Install-PyTorch-Cuda
+        $status = Get-PyTorchStatus
+    } elseif ($desiredCudaBuild -and $status.CudaBuild -and ($status.CudaBuild -ne $desiredCudaBuild)) {
+        Write-Host "Existing PyTorch CUDA build is $($status.CudaBuild), but installer target is CUDA $desiredCudaBuild." -ForegroundColor Yellow
+        Write-Host "Replacing it from: $TorchIndexUrl" -ForegroundColor Yellow
         Install-PyTorch-Cuda
         $status = Get-PyTorchStatus
     } else {
@@ -795,6 +894,9 @@ function Ensure-PyTorch-Cuda {
     }
     if ([string]::IsNullOrWhiteSpace($status.CudaBuild)) {
         throw "PyTorch installed successfully, but it is still a CPU-only build. Delete '$Root\.venv' and rerun install_windows.bat. Current torch: $($status.Version)"
+    }
+    if ($desiredCudaBuild -and ($status.CudaBuild -ne $desiredCudaBuild)) {
+        throw "PyTorch installed successfully, but torch $($status.Version) reports CUDA $($status.CudaBuild) instead of the installer target CUDA $desiredCudaBuild from $TorchIndexUrl."
     }
     if (-not $status.CudaAvailable) {
         throw "PyTorch has a CUDA build (torch $($status.Version), CUDA $($status.CudaBuild)), but torch.cuda.is_available() is false. Install or update your NVIDIA driver, then rerun install_windows.bat."
@@ -838,39 +940,27 @@ function Download-HfFile {
     Ensure-Directory $DownloadCache
     $HfExe = Join-Path $Root '.venv\Scripts\hf.exe'
     if (-not (Test-Path -LiteralPath $HfExe)) { $HfExe = 'hf' }
-    $stdout = [System.IO.Path]::GetTempFileName()
-    $stderr = [System.IO.Path]::GetTempFileName()
     $oldPythonUtf8 = $env:PYTHONUTF8
     $oldPythonIoEncoding = $env:PYTHONIOENCODING
     $oldDisableProgress = $env:HF_HUB_DISABLE_PROGRESS_BARS
     try {
         $env:PYTHONUTF8 = '1'
         $env:PYTHONIOENCODING = 'utf-8'
-        $env:HF_HUB_DISABLE_PROGRESS_BARS = '1'
-        $process = Start-Process `
-            -FilePath (Resolve-CommandExecutable $HfExe 'hf download') `
-            -ArgumentList @('download', $Repo, $File, '--local-dir', $DownloadCache) `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -RedirectStandardOutput $stdout `
-            -RedirectStandardError $stderr
-        $downloaded = ((Get-Content -LiteralPath $stdout -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue)).Trim()
-        if ($process.ExitCode -ne 0) {
-            throw "hf download failed for $Repo/$File`n$downloaded"
-        }
-        if ($downloaded) {
-            Write-Host $downloaded
+        Remove-Item Env:\HF_HUB_DISABLE_PROGRESS_BARS -ErrorAction SilentlyContinue
+        Write-Host "Downloading model: $Repo/$File"
+        try {
+            Invoke-External -Command @($HfExe, 'download', $Repo, $File, '--local-dir', $DownloadCache)
+        } catch {
+            throw "hf download failed for $Repo/$File`n$_"
         }
     } finally {
         $env:PYTHONUTF8 = $oldPythonUtf8
         $env:PYTHONIOENCODING = $oldPythonIoEncoding
         $env:HF_HUB_DISABLE_PROGRESS_BARS = $oldDisableProgress
-        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
     }
     $source = Join-Path $DownloadCache $File
     if (-not (Test-Path -LiteralPath $source)) {
-        throw "Downloaded file was not found for $Repo/$File. Last output: $downloaded"
+        throw "Downloaded file was not found for $Repo/$File."
     }
     Move-Item -LiteralPath $source -Destination $Destination
     Write-Host "Downloaded: $Destination"
@@ -957,7 +1047,7 @@ Invoke-Step 'Install ComfyUI custom nodes' {
     Install-CustomNodePackage 'ComfyUI-FlashVSR_Ultra_Fast' 'https://github.com/lihaoyun6/ComfyUI-FlashVSR_Ultra_Fast.git' (Join-Path $CustomNodes 'ComfyUI-FlashVSR_Ultra_Fast') -UpdateExisting
     Install-CustomNodePackage 'ComfyUI-MMAudio' 'https://github.com/kijai/ComfyUI-MMAudio.git' (Join-Path $CustomNodes 'ComfyUI-MMAudio') -UpdateExisting
     if (-not $SkipDeepExemplar) {
-        Install-CustomNodePackage 'reference-video-colorization' 'https://github.com/jonstreeter/ComfyUI-Reference-Based-Video-Colorization.git' (Join-Path $CustomNodes 'reference-video-colorization') -UpdateExisting
+        Install-CustomNodePackage 'reference-video-colorization' 'https://github.com/jonstreeter/ComfyUI-Reference-Based-Video-Colorization.git' (Join-Path $CustomNodes 'reference-video-colorization') -UpdateExisting -PreferBundled
     }
 }
 
@@ -1006,9 +1096,9 @@ Invoke-Step 'Install custom-node requirements' {
         Install-RequirementsIfPresent (Join-Path $CustomNodes 'reference-video-colorization\requirements.txt')
         Install-Pip @('scikit-image', 'einops', 'tqdm', 'matplotlib')
         if ($InstallCorrelationExtension) {
-            Install-Pip @('git+https://github.com/ClementPinard/Pytorch-Correlation-extension.git', '--no-build-isolation')
+            Install-CorrelationExtension-BestEffort
         } else {
-            Write-Host 'Skipping Pytorch-Correlation-extension. The Deep Exemplar node usually starts without it; pass -InstallCorrelationExtension to try building it.'
+            Write-Host 'Skipping Pytorch-Correlation-extension. ColorMNet will use its PyTorch fallback path; pass -InstallCorrelationExtension to try building it.'
         }
     }
 }

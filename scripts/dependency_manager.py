@@ -4,6 +4,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -130,7 +132,7 @@ def ensure_hf_models(comfy_dir: Path, models: list[HfModel], required: bool = Tr
                 size = remote_file_size(model.repo, model.file)
                 size_text = f" ({format_bytes(size)})" if size else ""
                 print(f"Downloading model: {model.repo}/{model.file}{size_text}", flush=True)
-                downloaded = download_hf_file(model.repo, model.file, cache_root)
+                downloaded = download_hf_file(model.repo, model.file, cache_root, size)
                 shutil.copy2(downloaded, destination)
                 print(f"Downloaded: {destination}", flush=True)
             except Exception as exc:
@@ -175,14 +177,76 @@ def format_bytes(size: int) -> str:
     return f"{size} B"
 
 
-def download_hf_file(repo: str, filename: str, cache_root: Path) -> Path:
+def download_hf_file(repo: str, filename: str, cache_root: Path, total_size: int = 0) -> Path:
     from huggingface_hub import hf_hub_download
 
     kwargs = {"repo_id": repo, "filename": filename, "cache_dir": cache_root}
+    stop_progress = threading.Event()
+    progress_thread = None
+    if total_size > 0:
+        baseline = cache_file_sizes(cache_root)
+        progress_thread = threading.Thread(
+            target=report_hf_download_progress,
+            args=(cache_root, total_size, baseline, stop_progress),
+            daemon=True,
+        )
+        progress_thread.start()
     try:
-        return Path(hf_hub_download(**kwargs, resume_download=True))
-    except TypeError:
-        return Path(hf_hub_download(**kwargs))
+        try:
+            downloaded = Path(hf_hub_download(**kwargs, resume_download=True))
+        except TypeError:
+            downloaded = Path(hf_hub_download(**kwargs))
+        if total_size > 0:
+            print("Download progress: 100%", flush=True)
+        return downloaded
+    finally:
+        stop_progress.set()
+        if progress_thread:
+            progress_thread.join(timeout=1)
+
+
+def cache_file_sizes(cache_root: Path) -> dict[Path, int]:
+    sizes: dict[Path, int] = {}
+    if not cache_root.exists():
+        return sizes
+    for path in cache_root.rglob("*"):
+        if path.is_file():
+            try:
+                sizes[path] = path.stat().st_size
+            except OSError:
+                pass
+    return sizes
+
+
+def report_hf_download_progress(cache_root: Path, total_size: int, baseline: dict[Path, int], stop: threading.Event) -> None:
+    last_percent = -1
+    while not stop.wait(2):
+        downloaded = estimate_downloaded_bytes(cache_root, baseline)
+        if downloaded <= 0:
+            continue
+        percent = max(0, min(99, int((downloaded / total_size) * 100)))
+        if percent > last_percent:
+            print(f"Download progress: {percent}%", flush=True)
+            last_percent = percent
+
+
+def estimate_downloaded_bytes(cache_root: Path, baseline: dict[Path, int]) -> int:
+    best = 0
+    if not cache_root.exists():
+        return best
+    for path in cache_root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            current = path.stat().st_size
+        except OSError:
+            continue
+        previous = baseline.get(path, 0)
+        growth = max(0, current - previous)
+        if path.name.endswith(".incomplete"):
+            growth = max(growth, current)
+        best = max(best, growth)
+    return best
 
 
 def ensure_outpaint_models(comfy_dir: Path) -> None:

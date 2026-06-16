@@ -54,6 +54,7 @@ from .project_io import (
 )
 from .process_utils import (
     count_lines_matching,
+    download_progress_percent,
     first_int_after,
     format_duration,
     outpaint_chunk_progress,
@@ -479,6 +480,7 @@ class PipelineApp:
         elapsed = max(0.0, time.time() - self.run_started_at)
         log_text = "\n".join(self.log[-300:])
         lower = log_text.lower()
+        download_percent = download_progress_percent(log_text)
         percent = min(90, 5 + int(elapsed / 60 * 20))
         label = "Running"
         if self.running_stage_key == "outpaint":
@@ -502,6 +504,9 @@ class PipelineApp:
             for token, value, text in milestones:
                 if token in lower and value >= percent:
                     percent, label = value, text
+            if download_percent is not None and download_percent < 100:
+                percent = max(percent, min(34, 10 + int(download_percent * 0.24)))
+                label = f"Downloading model {download_percent}%"
             if chunk["total"] and percent < 100:
                 rendering = chunk["current"] > chunk["done"] and ("queued comfyui prompt" in lower or "sending prompt nodes" in lower)
                 active_fraction = 0.5 if rendering else 0.2 if chunk["current"] > chunk["done"] else 0.0
@@ -540,9 +545,12 @@ class PipelineApp:
                         break
                 rows = first_int_after(reference_log, "Rows:")
                 done = min(rows, count_lines_matching(reference_log, ("Reuse ", "Wrote "))) if rows else 0
-                if rows:
-                    percent = min(99, int((done / rows) * 100))
-                    label = f"{done}/{rows} references"
+            if rows:
+                percent = min(99, int((done / rows) * 100))
+                label = f"{done}/{rows} references"
+            elif download_percent is not None and download_percent < 100:
+                percent = max(percent, min(30, 5 + int(download_percent * 0.25)))
+                label = f"Downloading model {download_percent}%"
         elif self.running_stage_key == "colour":
             colour_log = log_text
             for marker in ("scripts\\colorize_video.py", "scripts/colorize_video.py"):
@@ -573,6 +581,9 @@ class PipelineApp:
                 percent, label = max(percent, 75), "Existing colorized video reused"
             if "finished with exit code 0" in colour_lower:
                 percent, label = 100, "Colorization complete"
+            elif download_percent is not None and download_percent < 100:
+                percent = max(percent, min(30, 5 + int(download_percent * 0.25)))
+                label = f"Downloading model {download_percent}%"
         elif self.running_stage_key == "recomp":
             if "wrote composite" in lower:
                 percent, label = 100, "Composite written"
@@ -599,6 +610,9 @@ class PipelineApp:
             for token, value, text in milestones:
                 if token in lower and value >= percent:
                     percent, label = value, text
+            if download_percent is not None and download_percent < 100:
+                percent = max(percent, min(17, 7 + int(download_percent * 0.1)))
+                label = f"Downloading audio model {download_percent}%"
         elif self.running_stage_key == "upscale":
             label = "Upscaling"
             milestones = [

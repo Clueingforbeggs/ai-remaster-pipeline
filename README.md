@@ -75,8 +75,11 @@ Useful installer options:
 ```bat
 install_windows.bat -NonInteractive
 install_windows.bat -SkipDeepExemplar
+install_windows.bat -InstallCorrelationExtension
 install_windows.bat -TorchIndexUrl https://download.pytorch.org/whl/cu128
 ```
+
+ColorMNet uses a PyTorch fallback by default with the same output quality. `-InstallCorrelationExtension` attempts the optional faster CUDA correlation extension; it requires Visual Studio C++ Build Tools and a local CUDA Toolkit matching the installed PyTorch CUDA build. If the extension cannot build, installation continues in fallback mode.
 
 See [docs/installer-model-sources.md](docs/installer-model-sources.md) for the exact model and LoRA sources.
 
