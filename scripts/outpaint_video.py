@@ -1287,7 +1287,7 @@ def main() -> int:
         required_nodes = dict(OUTPAINT_REQUIRED_NODES)
         if args.model_backend == "gguf":
             required_nodes["UnetLoaderGGUF"] = "ComfyUI-GGUF"
-        ensure_node_types(args.comfy_url, required_nodes, "outpainting workflow")
+        ensure_node_types(args.comfy_url, required_nodes, "outpainting workflow", comfy_dir)
 
     prepare_command = [
         sys.executable,
