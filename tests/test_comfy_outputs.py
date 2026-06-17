@@ -60,7 +60,7 @@ class ComfyOutputTests(unittest.TestCase):
             self.assertEqual(found, produced)
             self.assertEqual(sleeps["count"], 1)
 
-    def test_missing_live_node_mentions_stale_comfy_when_package_defines_it(self) -> None:
+    def test_missing_live_node_mentions_import_failure_when_package_defines_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             comfy = Path(tmp_text) / "comfy"
             package = comfy / "custom_nodes" / "ComfyUI-LTXVideo"
@@ -68,7 +68,7 @@ class ComfyOutputTests(unittest.TestCase):
             (package / "__init__.py").write_text('NODE_CLASS_MAPPINGS = {"LTXAddVideoICLoRAGuide": object}\n', encoding="utf-8")
 
             with mock.patch.object(comfy_api, "object_info", return_value={}):
-                with self.assertRaisesRegex(RuntimeError, "older/stale ComfyUI process"):
+                with self.assertRaisesRegex(RuntimeError, "failed to import"):
                     comfy_api.ensure_node_types(
                         "http://127.0.0.1:8188",
                         {"LTXAddVideoICLoRAGuide": "ComfyUI-LTXVideo"},

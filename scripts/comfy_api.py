@@ -105,9 +105,9 @@ def ensure_node_types(comfy_url: str, required: dict[str, str], context: str = "
         )
         raise RuntimeError(
             f"ComfyUI is running at {comfy_url}, but the {context} cannot start because required node types are missing from the live server: {details}. "
-            f"The configured ComfyUI folder already contains those node definitions ({package_paths}), so the server at {comfy_url} is probably an older/stale ComfyUI process or it was not restarted after install. "
+            f"The configured ComfyUI folder already contains those node definitions ({package_paths}), so that custom-node package either failed to import or the server at {comfy_url} is an older/stale ComfyUI process that was not restarted after install. "
             f"Fully close every ComfyUI window/process using port 8188, then start ComfyUI from ARP again so it loads: {comfy_dir}. "
-            f"If it still fails after a restart, check the ComfyUI console for an import error from the package(s): {packages}."
+            f"If it still fails after a restart, the ComfyUI console import error for the package(s) is the root cause to fix: {packages}."
         )
     raise RuntimeError(
         f"ComfyUI is running at {comfy_url}, but the {context} cannot start because required node types are missing: {details}. "
