@@ -70,9 +70,20 @@ def same_path(left: Path, right: Path) -> bool:
         return left.absolute() == right.absolute()
 
 
-def comfy_output_root_for(config: dict[str, str] | None = None) -> str:
+def comfy_dir_for(config: dict[str, str] | None = None) -> str:
+    """ComfyUI install directory, falling back to the bundled tools/comfyui."""
     active = load_config() if config is None else config
-    return str(Path(active.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output")
+    return active.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
+
+
+def comfy_url_for(config: dict[str, str] | None = None) -> str:
+    """ComfyUI server URL, falling back to the local default."""
+    active = load_config() if config is None else config
+    return active.get("comfy_url", "http://127.0.0.1:8188")
+
+
+def comfy_output_root_for(config: dict[str, str] | None = None) -> str:
+    return str(Path(comfy_dir_for(config)) / "output")
 
 
 def current_config() -> dict[str, str]:
