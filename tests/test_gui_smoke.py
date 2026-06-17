@@ -318,6 +318,44 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(log_path.exists())
             self.assertIn("Starting ComfyUI:", log_path.read_text(encoding="utf-8"))
 
+    def test_stage_comfy_gate_waits_for_existing_launch(self) -> None:
+        class FakeProcess:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        fake_process = FakeProcess()
+        with (
+            mock.patch.object(lifecycle, "STARTED_COMFY_PROCESS", fake_process),
+            mock.patch.object(lifecycle, "current_config", return_value={"comfy_url": "http://127.0.0.1:8188"}),
+            mock.patch.object(lifecycle, "discover_comfy_instances", return_value=[]),
+            mock.patch.object(lifecycle, "comfy_is_running", side_effect=[False, True]) as is_running,
+            mock.patch.object(lifecycle.time, "sleep"),
+        ):
+            ok, message = lifecycle.ensure_comfy_available_for_stage("Outpainting")
+
+        self.assertTrue(ok)
+        self.assertEqual(message, "")
+        self.assertEqual(is_running.call_count, 2)
+
+    def test_wait_for_comfy_ready_clears_dead_launch_handle(self) -> None:
+        class ExitedProcess:
+            returncode = 1
+
+            def poll(self):
+                return 1
+
+        process = ExitedProcess()
+        with (
+            mock.patch.object(lifecycle, "STARTED_COMFY_PROCESS", process),
+            mock.patch.object(lifecycle, "comfy_is_running", return_value=False),
+        ):
+            ready = lifecycle.wait_for_comfy_ready("http://127.0.0.1:8188", process, timeout_seconds=1)
+            self.assertIsNone(lifecycle.STARTED_COMFY_PROCESS)
+
+        self.assertFalse(ready)
+
     def test_required_comfy_workflows_are_bundled(self) -> None:
         outpaint = app.ROOT / "workflows" / "outpaint_ltx" / "outpaint_LTX-IC.json"
         qwen = app.ROOT / "workflows" / "qwen_image_edit" / "Image Edit (Qwen 2511).json"
