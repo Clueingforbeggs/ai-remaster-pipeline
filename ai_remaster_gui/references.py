@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import IMAGE_EXTS, QWEN_IMAGE_EDIT_MODEL, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS
+from .config import IMAGE_EXTS, QWEN_IMAGE_EDIT_MODEL, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS, comfy_output_root_for
 from .manifests import read_manifest, read_manifest_details, update_manifest_row, write_manifest_details
 from .media import extract_video_frame_at
 from .paths import rel, resolve, safe_stem
@@ -197,7 +197,7 @@ def reference_edit_preview_command(manifest_text: str, index: int, instruction: 
     prompt = reference_edit_prompt(instruction, sampled_color)
     comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
     comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
-    comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
+    comfy_output = comfy_output_root_for(config)
     if mask:
         workflow = qwen_masked_workflow_for(values, config)
         if not workflow:
@@ -540,7 +540,7 @@ def reference_regeneration_command(manifest_text: str, index: int) -> tuple[list
         "--comfy-dir",
         config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
         "--comfy-output-root",
-        values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
+        comfy_output_root_for(config),
         "--model-backend",
         values.get("model_backend", "gguf"),
         "--gguf-model",

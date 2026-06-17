@@ -118,19 +118,34 @@ def wait_for_prompt(comfy_url: str, prompt_id: str, poll_seconds: float, transie
 
 
 def extract_output_files(history_entry: dict[str, Any], output_root: Path) -> list[Path]:
-    outputs = history_entry.get('outputs', {})
+    def file_items(value: Any):
+        if isinstance(value, dict):
+            if value.get("filename"):
+                yield value
+            for child in value.values():
+                yield from file_items(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from file_items(child)
+
+    outputs = history_entry.get("outputs", {})
     files: list[Path] = []
+    seen: set[Path] = set()
     for output in outputs.values():
         if not isinstance(output, dict):
             continue
-        for key in ('images', 'videos', 'gifs'):
-            for item in output.get(key, []):
-                filename = item.get('filename')
-                if not filename:
-                    continue
-                subfolder = item.get('subfolder') or ''
-                files.append(output_root / subfolder / filename)
-    return [path for path in files if path.exists()]
+        for item in file_items(output):
+            filename = item.get("filename")
+            if not filename:
+                continue
+            subfolder = item.get("subfolder") or ""
+            kind = str(item.get("type") or "output").lower()
+            base = {"input": output_root.parent / "input", "temp": output_root.parent / "temp"}.get(kind, output_root)
+            path = base / subfolder / filename
+            if path not in seen:
+                files.append(path)
+                seen.add(path)
+    return files
 
 
 def node_by_id(workflow: dict[str, Any], node_id: str) -> dict[str, Any]:

@@ -133,7 +133,7 @@ def ensure_hf_models(comfy_dir: Path, models: list[HfModel], required: bool = Tr
                 size_text = f" ({format_bytes(size)})" if size else ""
                 print(f"Downloading model: {model.repo}/{model.file}{size_text}", flush=True)
                 downloaded = download_hf_file(model.repo, model.file, cache_root, size)
-                shutil.copy2(downloaded, destination)
+                copy_model_file(downloaded, destination, size or downloaded.stat().st_size)
                 print(f"Downloaded: {destination}", flush=True)
             except Exception as exc:
                 if required:
@@ -230,17 +230,30 @@ def cache_file_sizes(cache_root: Path) -> dict[Path, int]:
 
 def report_hf_download_progress(cache_root: Path, total_size: int, baseline: dict[Path, int], stop: threading.Event) -> None:
     last_percent = -1
+    last_downloaded = 0
+    last_update_at = time.monotonic()
+    last_heartbeat_at = 0.0
     started_at = time.monotonic()
     while not stop.wait(2):
         downloaded = estimate_downloaded_bytes(cache_root, baseline)
         if downloaded <= 0:
             continue
+        now = time.monotonic()
         percent = max(0, min(99, int((downloaded / total_size) * 100)))
+        moved = downloaded > last_downloaded
+        if moved:
+            last_update_at = now
+            last_downloaded = downloaded
         if percent > last_percent:
             eta = download_eta(started_at, downloaded, total_size)
             eta_text = f", ETA {eta}" if eta else ""
             print(f"Download progress: {percent}%{eta_text}", flush=True)
             last_percent = percent
+            last_heartbeat_at = now
+        elif now - last_heartbeat_at >= 30:
+            note = "still working" if now - last_update_at < 120 else "waiting for network or Hugging Face"
+            print(f"Download progress: {percent}%, {note}", flush=True)
+            last_heartbeat_at = now
 
 
 def download_eta(started_at: float, downloaded: int, total_size: int) -> str:
@@ -264,8 +277,37 @@ def format_duration(seconds: float) -> str:
     return f"{minutes:d}:{secs:02d}"
 
 
+def copy_model_file(source: Path, destination: Path, total_size: int) -> None:
+    print(f"Installing model: {destination}", flush=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_destination = destination.with_name(destination.name + ".partial")
+    copied = 0
+    last_percent = -1
+    last_heartbeat_at = time.monotonic()
+    with source.open("rb") as src, temp_destination.open("wb") as dst:
+        while True:
+            chunk = src.read(16 * 1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
+            copied += len(chunk)
+            if total_size > 0:
+                percent = max(0, min(99, int((copied / total_size) * 100)))
+                now = time.monotonic()
+                if percent > last_percent or now - last_heartbeat_at >= 30:
+                    print(f"Install progress: {percent}%", flush=True)
+                    last_percent = percent
+                    last_heartbeat_at = now
+    shutil.copystat(source, temp_destination)
+    if destination.exists():
+        destination.unlink()
+    temp_destination.replace(destination)
+    print("Install progress: 100%", flush=True)
+
+
 def estimate_downloaded_bytes(cache_root: Path, baseline: dict[Path, int]) -> int:
     best = 0
+    newest_incomplete: tuple[float, int] | None = None
     if not cache_root.exists():
         return best
     for path in cache_root.rglob("*"):
@@ -273,13 +315,19 @@ def estimate_downloaded_bytes(cache_root: Path, baseline: dict[Path, int]) -> in
             continue
         try:
             current = path.stat().st_size
+            mtime = path.stat().st_mtime
         except OSError:
             continue
         previous = baseline.get(path, 0)
         growth = max(0, current - previous)
         if path.name.endswith(".incomplete"):
-            growth = max(growth, current)
+            downloaded = max(growth, current)
+            if newest_incomplete is None or mtime > newest_incomplete[0]:
+                newest_incomplete = (mtime, downloaded)
+            continue
         best = max(best, growth)
+    if newest_incomplete is not None:
+        return newest_incomplete[1]
     return best
 
 

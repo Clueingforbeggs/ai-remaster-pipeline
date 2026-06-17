@@ -41,7 +41,10 @@ def load_config() -> dict[str, str]:
                 config.update({key: str(value) for key, value in stored.items() if value is not None})
         except json.JSONDecodeError:
             pass
-    config["comfy_dir"] = str(resolve_comfy_dir(config["comfy_dir"]))
+    comfy_dir = resolve_comfy_dir(config["comfy_dir"])
+    config["comfy_dir"] = str(comfy_dir)
+    if same_path(comfy_dir, ROOT / "tools" / "comfyui"):
+        config["comfy_managed_by_arp"] = "true"
     return config
 
 
@@ -54,6 +57,18 @@ def resolve_comfy_dir(path_text: str) -> Path:
         if (nested / "main.py").exists():
             return nested
     return path
+
+
+def same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except OSError:
+        return left.absolute() == right.absolute()
+
+
+def comfy_output_root_for(config: dict[str, str] | None = None) -> str:
+    active = load_config() if config is None else config
+    return str(Path(active.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output")
 
 
 def current_config() -> dict[str, str]:

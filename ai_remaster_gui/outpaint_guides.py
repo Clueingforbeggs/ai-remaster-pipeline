@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import IMAGE_EXTS, QWEN_IMAGE_EDIT_MODEL, ROOT, SCRIPTS
+from .config import IMAGE_EXTS, QWEN_IMAGE_EDIT_MODEL, ROOT, SCRIPTS, comfy_output_root_for
 from .manifests import read_outpaint_chunk_rows, write_outpaint_chunk_rows
 from .media import extract_video_frame_at
 from .paths import rel, resolve, resolve_video_source
@@ -264,7 +264,7 @@ def auto_masked_guide_command(source: Path, output: Path, prompt: str, mask: Pat
         "--workflow", workflow,
         "--comfy-url", values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188"),
         "--comfy-dir", config.get("comfy_dir", str(ROOT / "tools" / "comfyui")),
-        "--comfy-output-root", values.get("comfy_output_root") or str(Path(config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))) / "output"),
+        "--comfy-output-root", comfy_output_root_for(config),
         "--model-backend", values.get("model_backend", "gguf"),
         "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL),
         "--instruction", prompt,
@@ -536,7 +536,7 @@ def guide_edit_preview_command(chunk_index: int, guide_index: int, instruction: 
     config = current_config()
     comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
     comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
-    comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
+    comfy_output = comfy_output_root_for(config)
     workflow = qwen_masked_workflow_for(values, config)
     if not workflow:
         raise RuntimeError("Guide editing needs a Qwen masked edit workflow. ARP's bundled masked workflow was not found, and no custom workflow is set.")

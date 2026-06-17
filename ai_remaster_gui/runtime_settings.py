@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 from .config import (
-    CONFIG_FILE,
     OUTPAINT_PROMPT,
     QWEN_IMAGE_EDIT_MODEL,
     REFERENCE_PROMPT,
@@ -14,6 +13,7 @@ from .config import (
     ROOT,
     SETTINGS_FILE,
     VIDEO_EXTS,
+    comfy_output_root_for,
     current_config,
 )
 from .models import STAGES
@@ -143,10 +143,8 @@ def load_settings() -> dict[str, dict[str, str]]:
     defaults["outpaint"]["seed_qwen_guides"] = "false"
     defaults["colour"].setdefault("method", "deepexemplar")
     defaults["recomp"].setdefault("colorization_method", "deepexemplar")
-    bundled_output = rel(ROOT / "tools" / "comfyui" / "output")
     config = current_config()
-    if not defaults["references"].get("comfy_output_root") or (CONFIG_FILE.exists() and defaults["references"].get("comfy_output_root") == bundled_output):
-        defaults["references"]["comfy_output_root"] = rel(Path(config["comfy_dir"]) / "output")
+    defaults["references"]["comfy_output_root"] = rel(Path(comfy_output_root_for(config)))
     if not defaults["references"].get("comfy_url"):
         defaults["references"]["comfy_url"] = config["comfy_url"]
     if should_migrate_qwen_workflow(defaults["references"].get("workflow", "")):

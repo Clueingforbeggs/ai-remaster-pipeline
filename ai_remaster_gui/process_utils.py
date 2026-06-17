@@ -41,6 +41,10 @@ def download_progress_status(text: str) -> dict[str, str | int] | None:
             eta = after_percent.split(eta_marker, 1)[1].strip().strip(".,")
             if eta:
                 status["eta"] = eta
+        elif after_percent:
+            note = after_percent.lstrip(", ").strip().strip(".,")
+            if note:
+                status["note"] = note
         latest = status
     return latest
 
@@ -48,7 +52,24 @@ def download_progress_status(text: str) -> dict[str, str | int] | None:
 def download_eta_label(status: dict[str, str | int] | None) -> str:
     if status and status.get("eta"):
         return f", ETA {status['eta']}"
+    if status and status.get("note"):
+        return f", {status['note']}"
     return ""
+
+
+def install_progress_status(text: str) -> dict[str, int] | None:
+    latest: dict[str, int] | None = None
+    marker = "Install progress:"
+    for line in text.splitlines():
+        if marker not in line:
+            continue
+        tail = line.split(marker, 1)[1].strip()
+        value = tail.split("%", 1)[0].strip()
+        try:
+            latest = {"percent": max(0, min(100, int(value)))}
+        except ValueError:
+            pass
+    return latest
 
 
 def outpaint_chunk_progress(text: str) -> dict[str, int]:

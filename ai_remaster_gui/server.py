@@ -28,6 +28,7 @@ from .config import (
     STATIC_DIR,
     TEXT_EXTS,
     VIDEO_EXTS,
+    comfy_output_root_for,
     current_config,
 )
 from .manifests import (
@@ -58,6 +59,7 @@ from .process_utils import (
     download_progress_status,
     first_int_after,
     format_duration,
+    install_progress_status,
     outpaint_chunk_progress,
     outpaint_eta_label,
     upscale_chunk_progress,
@@ -483,6 +485,8 @@ class PipelineApp:
         lower = log_text.lower()
         download_status = download_progress_status(log_text)
         download_percent = int(download_status["percent"]) if download_status else None
+        install_status = install_progress_status(log_text)
+        install_percent = int(install_status["percent"]) if install_status else None
         percent = min(90, 5 + int(elapsed / 60 * 20))
         label = "Running"
         if self.running_stage_key == "outpaint":
@@ -509,6 +513,9 @@ class PipelineApp:
             if download_percent is not None and download_percent < 100:
                 percent = max(percent, min(34, 10 + int(download_percent * 0.24)))
                 label = f"Downloading model {download_percent}%{download_eta_label(download_status)}"
+            elif install_percent is not None and install_percent < 100:
+                percent = max(percent, min(39, 34 + int(install_percent * 0.05)))
+                label = f"Installing model {install_percent}%"
             if chunk["total"] and percent < 100:
                 rendering = chunk["current"] > chunk["done"] and ("queued comfyui prompt" in lower or "sending prompt nodes" in lower)
                 active_fraction = 0.5 if rendering else 0.2 if chunk["current"] > chunk["done"] else 0.0
@@ -554,6 +561,9 @@ class PipelineApp:
             elif download_percent is not None and download_percent < 100:
                 percent = max(percent, min(30, 5 + int(download_percent * 0.25)))
                 label = f"Downloading model {download_percent}%{download_eta_label(download_status)}"
+            elif install_percent is not None and install_percent < 100:
+                percent = max(percent, min(35, 30 + int(install_percent * 0.05)))
+                label = f"Installing model {install_percent}%"
         elif self.running_stage_key == "colour":
             colour_log = log_text
             for marker in ("scripts\\colorize_video.py", "scripts/colorize_video.py"):
@@ -587,6 +597,9 @@ class PipelineApp:
             elif download_percent is not None and download_percent < 100:
                 percent = max(percent, min(30, 5 + int(download_percent * 0.25)))
                 label = f"Downloading model {download_percent}%{download_eta_label(download_status)}"
+            elif install_percent is not None and install_percent < 100:
+                percent = max(percent, min(35, 30 + int(install_percent * 0.05)))
+                label = f"Installing model {install_percent}%"
         elif self.running_stage_key == "recomp":
             if "wrote composite" in lower:
                 percent, label = 100, "Composite written"
@@ -616,6 +629,9 @@ class PipelineApp:
             if download_percent is not None and download_percent < 100:
                 percent = max(percent, min(17, 7 + int(download_percent * 0.1)))
                 label = f"Downloading audio model {download_percent}%{download_eta_label(download_status)}"
+            elif install_percent is not None and install_percent < 100:
+                percent = max(percent, min(22, 17 + int(install_percent * 0.05)))
+                label = f"Installing audio model {install_percent}%"
         elif self.running_stage_key == "upscale":
             label = "Upscaling"
             milestones = [
@@ -1035,7 +1051,7 @@ class PipelineApp:
                 add(["--qwen-prompt", DEFAULT_ANCHOR_PROMPT])
                 add(["--qwen-load-image-node-id", ref.get("load_image_node_id", "auto")])
                 add(["--qwen-save-node-id", ref.get("save_node_id", "auto")])
-                add(["--comfy-output-root", ref.get("comfy_output_root") or str(Path(comfy_dir) / "output")])
+                add(["--comfy-output-root", comfy_output_root_for(config)])
                 shot_values = self.settings.get("shots", {})
                 add(["--seed-sample-seconds", shot_values.get("sample_seconds", "0") or "0"])
                 add(["--seed-shot-threshold", shot_values.get("shot_threshold", "0.075") or "0.075"])
@@ -1079,7 +1095,7 @@ class PipelineApp:
                 workflow = qwen_workflow_for(values, config)
                 comfy_url = values.get("comfy_url") or config.get("comfy_url", "http://127.0.0.1:8188")
                 comfy_dir = config.get("comfy_dir", str(ROOT / "tools" / "comfyui"))
-                comfy_output = values.get("comfy_output_root") or str(Path(comfy_dir) / "output")
+                comfy_output = comfy_output_root_for(config)
                 add(["--manifest", values.get("manifest", ""), "--workflow", workflow, "--comfy-url", comfy_url])
                 add(["--comfy-dir", comfy_dir, "--comfy-output-root", comfy_output])
                 add(["--model-backend", values.get("model_backend", "gguf"), "--gguf-model", values.get("gguf_model", QWEN_IMAGE_EDIT_MODEL)])

@@ -190,17 +190,26 @@ def copy_to_comfy_input(path: Path, comfy_dir: Path, subfolder: str) -> str:
     return str(Path(subfolder) / target.name).replace("\\", "/")
 
 
-def newest_output(files: list[Path], suffixes: set[str] | None = None, label: str = "output file") -> Path:
+def newest_output(
+    files: list[Path],
+    suffixes: set[str] | None = None,
+    label: str = "output file",
+    exist_attempts: int = 20,
+    exist_delay: float = 0.25,
+) -> Path:
     candidates = files
     if suffixes:
         wanted = {suffix.lower() for suffix in suffixes}
         candidates = [path for path in files if path.suffix.lower() in wanted]
     if not candidates:
         raise RuntimeError(f"ComfyUI completed but did not report a {label}.")
-    existing = [path for path in candidates if path.exists()]
-    if not existing:
-        raise RuntimeError(f"ComfyUI reported {label}s, but none exist on disk: {candidates}")
-    return max(existing, key=lambda path: path.stat().st_mtime_ns)
+    for attempt in range(max(1, exist_attempts)):
+        existing = [path for path in candidates if path.exists()]
+        if existing:
+            return max(existing, key=lambda path: path.stat().st_mtime_ns)
+        if attempt < exist_attempts - 1:
+            time.sleep(exist_delay)
+    raise RuntimeError(f"ComfyUI reported {label}s, but none exist on disk after waiting: {candidates}")
 
 
 def replace_with_retry(source: Path, target: Path, label: str | None = None, attempts: int = 20, delay: float = 0.5) -> None:

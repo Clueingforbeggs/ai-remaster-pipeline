@@ -537,7 +537,8 @@ function Resolve-ComfyInstallMode {
         }
     }
 
-    $selected = [System.IO.Path]::GetFullPath($DefaultComfyDir)
+    $defaultFull = [System.IO.Path]::GetFullPath($DefaultComfyDir)
+    $selected = $defaultFull
     if (-not $NonInteractive) {
         Write-Host 'Choose where ARP should find or install ComfyUI.'
         Write-Host "Press Enter for the ARP-managed default: $selected"
@@ -549,7 +550,19 @@ function Resolve-ComfyInstallMode {
 
     $resolvedSelected = Resolve-ComfyDirPath $selected
     if ($resolvedSelected) {
-        Write-Host "Using existing ComfyUI at: $resolvedSelected"
+        $selectedIsDefault = [string]::Equals(
+            [System.IO.Path]::GetFullPath($resolvedSelected),
+            $defaultFull,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+        if ($selectedIsDefault) {
+            Write-Host "Using ARP-managed ComfyUI at: $resolvedSelected"
+            return @{
+                Dir = $resolvedSelected
+                Existing = $false
+            }
+        }
+        Write-Host "Using existing external ComfyUI at: $resolvedSelected"
         return @{
             Dir = $resolvedSelected
             Existing = $true

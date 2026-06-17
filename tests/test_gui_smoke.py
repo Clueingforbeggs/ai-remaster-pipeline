@@ -64,6 +64,24 @@ class GuiSmokeTests(unittest.TestCase):
 
             self.assertEqual(app.resolve_video_source(str(typed)), real)
 
+    def test_default_comfy_dir_is_treated_as_managed_even_with_stale_flag(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            root = Path(tmp_text)
+            comfy_dir = root / "tools" / "comfyui"
+            comfy_dir.mkdir(parents=True)
+            (comfy_dir / "main.py").write_text("# fake comfy", encoding="utf-8")
+            config_file = root / ".ai_remaster_config.json"
+            config_file.write_text(
+                json.dumps({"comfy_dir": str(comfy_dir), "comfy_managed_by_arp": "false"}),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(config, "ROOT", root), mock.patch.object(config, "CONFIG_FILE", config_file):
+                loaded = config.load_config()
+
+        self.assertEqual(loaded["comfy_dir"], str(comfy_dir))
+        self.assertEqual(loaded["comfy_managed_by_arp"], "true")
+
     def test_run_all_waits_for_stage_hydration_before_next_stage(self) -> None:
         class DoneProcess:
             returncode = 0
@@ -2591,6 +2609,53 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(progress["label"], "Downloading model 7%, ETA 12:04")
         self.assertGreater(progress["percent"], 5)
         self.assertLess(progress["percent"], 30)
+
+    def test_reference_regeneration_model_download_heartbeat_replaces_stale_eta(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "references"
+        app.APP.running_stage = "Reference Generation"
+        app.APP.running_reference_index = 0
+        app.APP.run_started_at = time.time() - 180
+        app.APP.log = [
+            "Downloading model: Comfy-Org/Qwen-Image_ComfyUI/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors (8.7 GB)",
+            "Download progress: 80%, ETA 0:01",
+            "Download progress: 80%, still working",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.running_reference_index = None
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "Downloading model 80%, still working")
+
+    def test_reference_regeneration_model_install_progress_surfaces_percent(self) -> None:
+        original_log = app.APP.log
+        app.APP.running_stage_key = "references"
+        app.APP.running_stage = "Reference Generation"
+        app.APP.running_reference_index = 0
+        app.APP.run_started_at = time.time() - 180
+        app.APP.log = [
+            "Downloading model: Comfy-Org/Qwen-Image_ComfyUI/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors (8.7 GB)",
+            "Download progress: 100%",
+            "Installing model: D:\\dtaddis\\ai-remaster-pipeline\\tools\\comfyui\\models\\text_encoders\\qwen_2.5_vl_7b_fp8_scaled.safetensors",
+            "Install progress: 52%",
+        ]
+
+        try:
+            progress = app.APP.estimate_running_progress()
+        finally:
+            app.APP.running_stage_key = ""
+            app.APP.running_stage = ""
+            app.APP.running_reference_index = None
+            app.APP.run_started_at = 0.0
+            app.APP.log = original_log
+
+        self.assertEqual(progress["label"], "Installing model 52%")
 
     def test_reference_progress_ignores_previous_stage_writes(self) -> None:
         original_log = app.APP.log
