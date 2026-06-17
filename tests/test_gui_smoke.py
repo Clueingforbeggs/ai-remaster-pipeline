@@ -28,6 +28,7 @@ import create_audio_track  # noqa: E402
 import generate_single_reference  # noqa: E402
 import guide_frame_utils  # noqa: E402
 import edit_reference_image  # noqa: E402
+import final_composite  # noqa: E402
 import openai_generate_reference  # noqa: E402
 import outpaint_video  # noqa: E402
 import prepare_outpaint_input  # noqa: E402
@@ -250,6 +251,52 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertNotEqual(output_black, output_plain)
         self.assertTrue(prepared_black.name.startswith("My_prepared_"), prepared_black.name)
         self.assertIn("--outpaint-all-black-regions", command)
+
+    def test_final_composite_can_make_source_black_transparent(self) -> None:
+        args = final_composite.build_parser().parse_args(
+            [
+                "--outpainted", "outpainted.mp4",
+                "--source", "source.mp4",
+                "--output", "final.mp4",
+                "--source-black-transparent",
+                "--source-black-threshold", "12",
+            ]
+        )
+
+        filter_text = final_composite.build_filter(args, has_color=False, fps=24.0)
+
+        self.assertIn("a='if(lte(min(", filter_text)
+        self.assertIn("min(max(X-2,0),W-1)", filter_text)
+        self.assertIn(",12),0,", filter_text)
+        self.assertIn("[base][srcm]overlay", filter_text)
+
+    def test_recomposition_command_punches_source_black_when_outpainting_all_black_regions(self) -> None:
+        app.APP.settings["global"].update({"source": "input/My Source.mp4", "section_start": "0", "section_end": ""})
+        app.APP.settings["outpaint"].update(
+            {
+                "target_aspect": "16:9",
+                "target_height": "720",
+                "crop_left": "0",
+                "crop_right": "0",
+                "crop_top": "0",
+                "crop_bottom": "0",
+                "outpaint_all_black_regions": "true",
+            }
+        )
+        app.APP.settings["recomp"].update(
+            {
+                "outpainted_video": "intermediate/outpainted/My_outpaint.mp4",
+                "source": "input/My Source.mp4",
+                "output": "output/reassembled/My_recomp.mp4",
+            }
+        )
+
+        command = app.APP.command_for("recomp")
+        app.APP.settings["outpaint"]["outpaint_all_black_regions"] = "false"
+        protected_command = app.APP.command_for("recomp")
+
+        self.assertIn("--source-black-transparent", command)
+        self.assertNotIn("--source-black-transparent", protected_command)
 
     def test_portable_comfy_parent_resolves_to_inner_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

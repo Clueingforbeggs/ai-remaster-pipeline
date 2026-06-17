@@ -1133,6 +1133,8 @@ class PipelineApp:
             outpaint_values = self.settings.get("outpaint", {})
             for key in ("crop_left", "crop_right", "crop_top", "crop_bottom"):
                 add([f"--{key.replace('_', '-')}", outpaint_values.get(key, "0")])
+            if outpaint_values.get("outpaint_all_black_regions", "false") == "true":
+                add(["--source-black-transparent"])
             # Pass delivery dimensions so final_composite upscales from the model-safe LTX output
             # (e.g. 704p) back to the user's intended resolution (e.g. 720p).
             source_text = pipeline_source_text(self.settings)
