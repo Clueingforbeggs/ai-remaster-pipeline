@@ -45,16 +45,90 @@ from ai_remaster_gui import server
 
 
 class GuiSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        # Isolate the suite from the developer's live .ai_remaster_gui.json regardless of how it is
+        # launched. In particular `unittest discover -s tests` imports sibling test modules (which
+        # pull in ai_remaster_gui.config) before tests/__init__.py runs, so the ARP_SETTINGS_FILE
+        # redirect there can lose the import race and app.APP would load real settings. Redirect the
+        # load and save paths to a throwaway file here and rebuild settings from defaults, then
+        # snapshot that as the per-test baseline (setUp resets to a deep copy of it each test).
+        tmp_settings = Path(tempfile.mkdtemp(prefix="arp-test-settings-")) / "settings.json"
+        for target in (app, server):
+            patcher = mock.patch.object(target, "SETTINGS_FILE", tmp_settings)
+            patcher.start()
+            cls.addClassCleanup(patcher.stop)
+        app.APP.settings = server.load_settings()
+        cls._pristine_settings = copy.deepcopy(app.APP.settings)
+
     def setUp(self) -> None:
-        self._settings = copy.deepcopy(app.APP.settings)
+        app.APP.settings = copy.deepcopy(self._pristine_settings)
         # Default the soundtrack phase off so stage-order / upscale-chaining tests are not
         # affected by whatever add_soundtrack happens to be in the loaded settings.
         app.APP.settings.setdefault("global", {})["add_soundtrack"] = "false"
         app.APP.quitting = False
 
     def tearDown(self) -> None:
-        app.APP.settings = self._settings
         app.APP.quitting = False
+
+    def _populate_full_pipeline_settings(self) -> None:
+        """Populate settings so command_for can build a full command for every stage. Used by the
+        stage-dispatch characterization tests below, which guard the per-stage routing while it is
+        being consolidated out of the if/elif chains."""
+        app.APP.settings["global"].update({
+            "source": "input/fixture_clip.mp4", "section_start": "0", "section_end": "",
+            "expand_outpaint": "true", "colorize": "true", "upscale": "true", "add_soundtrack": "true",
+        })
+        app.APP.settings["shots"]["outpainted_video"] = "intermediate/outpainted/Fixture_outpaint.mp4"
+        app.APP.settings["references"].update({"manifest": "manifests/references/Fixture_shots.csv", "method": "qwen"})
+        app.APP.settings["colour"]["manifest"] = "manifests/references/Fixture_shots.csv"
+        app.APP.settings["recomp"].update({
+            "outpainted_video": "intermediate/outpainted/Fixture_outpaint.mp4",
+            "source": "input/fixture_clip.mp4",
+            "colorized_video": "intermediate/outpainted_colorized/Fixture_color.mp4",
+        })
+        app.APP.settings["audio"]["input_video"] = "output/reassembled/Fixture_recomp.mp4"
+        app.APP.settings["upscale"]["input_video"] = "output/reassembled/Fixture_recomp.mp4"
+
+    def test_stage_commands_route_to_expected_scripts(self) -> None:
+        # Characterization guard: every stage's command_for must launch its producer script via
+        # `python -u <script>`. Protects the dispatch while it is consolidated into a stage registry.
+        self._populate_full_pipeline_settings()
+        expected = {
+            "outpaint": "outpaint_video.py",
+            "shots": "generate_references.py",
+            "references": "qwen_colorize_references.py",
+            "colour": "colorize_video.py",
+            "recomp": "final_composite.py",
+            "audio": "create_audio_track.py",
+            "upscale": "upscale_video.py",
+        }
+        for key, script in expected.items():
+            cmd = app.APP.command_for(key)
+            self.assertTrue(cmd, f"{key} produced an empty command")
+            self.assertEqual(cmd[:2], [sys.executable, "-u"], key)
+            self.assertEqual([Path(p).name for p in cmd if p.endswith(".py")], [script], key)
+        # The reference stage swaps scripts by method.
+        app.APP.settings["references"]["method"] = "openai"
+        self.assertIn("openai_generate_reference.py", [Path(p).name for p in app.APP.command_for("references")])
+
+    def test_active_stages_for_global_flag_combinations(self) -> None:
+        # Characterization guard for which phases run per global-toggle combination. Recomposition
+        # is implied by outpaint OR colorize; audio and upscale are independent tail stages.
+        def active(expand: str, colorize: str, soundtrack: str, upscale: str) -> list[str]:
+            app.APP.settings["global"].update({
+                "expand_outpaint": expand, "colorize": colorize,
+                "add_soundtrack": soundtrack, "upscale": upscale,
+            })
+            return [stage.key for stage in app.APP.active_stages()]
+
+        T, F = "true", "false"
+        self.assertEqual(active(T, T, T, T), ["outpaint", "shots", "references", "colour", "recomp", "audio", "upscale"])
+        self.assertEqual(active(T, F, F, F), ["outpaint", "recomp"])
+        self.assertEqual(active(F, T, F, F), ["shots", "references", "colour", "recomp"])
+        self.assertEqual(active(F, F, F, T), ["upscale"])
+        self.assertEqual(active(F, F, T, F), ["audio"])
+        self.assertEqual(active(F, F, F, F), [])
 
     def test_source_resolver_accepts_ascii_pipe_for_full_width_pipe_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

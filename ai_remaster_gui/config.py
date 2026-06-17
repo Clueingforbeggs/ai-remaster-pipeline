@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-SETTINGS_FILE = ROOT / ".ai_remaster_gui.json"
+# Settings normally live next to the project, but ARP_SETTINGS_FILE can redirect them (the test
+# suite points it at a throwaway file so tests neither read nor clobber the developer's real UI
+# state). No effect on normal runs where the variable is unset.
+SETTINGS_FILE = Path(os.environ["ARP_SETTINGS_FILE"]) if os.environ.get("ARP_SETTINGS_FILE") else ROOT / ".ai_remaster_gui.json"
 CONFIG_FILE = ROOT / ".ai_remaster_config.json"
 PREVIEW_DIR = ROOT / ".cache" / "previews"
 FILE_PREVIEW_DIR = ROOT / ".cache" / "file_previews"
