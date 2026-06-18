@@ -53,7 +53,6 @@ from .project_io import (
     source_analysis_key,
     source_signature,
     write_project_file,
-    bind_context as bind_project_context,
 )
 from .process_utils import (
     count_lines_matching,
@@ -111,7 +110,6 @@ from .file_dialogs import (
     browse_path_zenity,
     parse_duration,
     remember_browse_dir,
-    bind_context as bind_file_dialogs_context,
 )
 from .lifecycle import (
     create_server,
@@ -146,7 +144,7 @@ from .outpaint_guides import (
     upload_guide_frame_image,
     bind_context as bind_outpaint_guides_context,
 )
-from .cache import cache_state, delete_cache_category, delete_cache_file, human_size, bind_context as bind_cache_context
+from .cache import cache_state, delete_cache_category, delete_cache_file, human_size
 from .runtime_settings import APP_VERSION, default_qwen_workflow, load_settings, qwen_masked_workflow_for, qwen_workflow_for
 from .system_status import system_status
 from .media import (
@@ -2561,11 +2559,8 @@ def clear_outpaint_end_guide(index: int) -> dict[str, str]:
 
 from .http_handler import Handler, bind_context as bind_http_handler_context
 
-bind_cache_context(globals())
-bind_project_context(globals())
 bind_media_context(globals())
 bind_references_context(globals())
-bind_file_dialogs_context(globals())
 bind_outpaint_guides_context(globals())
 bind_http_handler_context(globals())
 
