@@ -754,13 +754,15 @@ def ensure_source_section_clip(settings: dict) -> str:
     if end <= start:
         return source_text
     output = source_section_output_for(settings)
-    if output.exists() and output.stat().st_size > 0:
-        return rel(output)
     ffmpeg = local_tool("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("Run install_windows.bat to install local FFmpeg for source section trimming.")
+    expected_duration = max(0.041, end - start)
+    if source_section_clip_is_valid(output, ffmpeg, expected_duration):
+        return rel(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix(output.suffix + ".partial" + output.suffix)
+    has_audio = source_has_audio_stream(ffmpeg, source)
     command = [
         ffmpeg,
         "-y",
@@ -774,14 +776,14 @@ def ensure_source_section_clip(settings: dict) -> str:
         "0:v:0",
         "-map",
         "0:a?",
+        "-vf",
+        "setpts=PTS-STARTPTS",
         "-c:v",
         "libx264",
         "-crf",
         "14",
         "-preset",
         "veryfast",
-        "-c:a",
-        "copy",
         "-sn",
         "-dn",
         "-map_metadata",
@@ -790,12 +792,104 @@ def ensure_source_section_clip(settings: dict) -> str:
         "+faststart",
         str(partial),
     ]
+    if has_audio:
+        audio_args = ["-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k"]
+        command[command.index("-sn"):command.index("-sn")] = audio_args
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "ffmpeg source section trim failed").strip())
     partial.replace(output)
-    state.APP.log.append(f"Prepared source section clip: {rel(output)}")
+    log_media_message(f"Prepared source section clip: {rel(output)}")
     return rel(output)
+
+def source_section_clip_is_valid(output: Path, ffmpeg: str, expected_duration: float) -> bool:
+    if not output.exists() or output.stat().st_size <= 0:
+        return False
+    try:
+        timing = source_section_timing(ffmpeg, output)
+    except Exception:
+        return True
+    first_pts = timing.get("first_pts")
+    duration = timing.get("duration")
+    if first_pts is not None and abs(first_pts) > 0.25:
+        log_media_message(f"Regenerating source section with non-zero first video timestamp: {rel(output)} ({first_pts:.3f}s)")
+        return False
+    if duration is not None and expected_duration > 0 and abs(duration - expected_duration) > 1.0:
+        log_media_message(
+            f"Regenerating source section with mismatched duration: {rel(output)} "
+            f"({duration:.3f}s, expected {expected_duration:.3f}s)"
+        )
+        return False
+    return True
+
+def source_section_timing(ffmpeg: str, output: Path) -> dict[str, float | None]:
+    ffprobe = ffprobe_for_ffmpeg(ffmpeg)
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-read_intervals",
+            "%+#1",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=start_time,duration:packet=pts_time",
+            "-of",
+            "json",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout or "{}")
+    packets = payload.get("packets") or []
+    streams = payload.get("streams") or [{}]
+    stream = streams[0] if streams else {}
+    first_pts = float(packets[0]["pts_time"]) if packets and packets[0].get("pts_time") is not None else _optional_float(stream.get("start_time"))
+    return {"first_pts": first_pts, "duration": _optional_float(stream.get("duration"))}
+
+def source_has_audio_stream(ffmpeg: str, source: Path) -> bool:
+    try:
+        ffprobe = ffprobe_for_ffmpeg(ffmpeg)
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "json",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return bool(json.loads(result.stdout or "{}").get("streams"))
+    except Exception:
+        return True
+
+def ffprobe_for_ffmpeg(ffmpeg: str) -> str:
+    path = Path(ffmpeg)
+    if path.suffix.lower() == ".exe":
+        return str(path.with_name("ffprobe.exe"))
+    return "ffprobe"
+
+def _optional_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def log_media_message(message: str) -> None:
+    app = getattr(state, "APP", None)
+    if app is not None:
+        app.log.append(message)
 
 def section_float(value: str, default: float) -> float:
     try:

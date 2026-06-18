@@ -38,6 +38,7 @@ import upscale_video  # noqa: E402
 from ai_remaster_gui import app
 from ai_remaster_gui import config
 from ai_remaster_gui import lifecycle
+from ai_remaster_gui import media
 from ai_remaster_gui import outpaint_guides
 from ai_remaster_gui import project_io
 from ai_remaster_gui import sam_masks
@@ -1492,6 +1493,53 @@ class GuiSmokeTests(unittest.TestCase):
         app.APP.settings["global"].update({"source": "input/example.mp4", "section_start": "12", "section_end": "24"})
 
         self.assertIn("source_sections", app.pipeline_source_text(app.APP.settings))
+
+    def test_existing_source_section_with_late_first_pts_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            clip = Path(tmp_text) / "section.mp4"
+            clip.write_bytes(b"placeholder")
+
+            with mock.patch.object(media, "source_section_timing", return_value={"first_pts": 5.249, "duration": 68.351}):
+                self.assertFalse(media.source_section_clip_is_valid(clip, "ffmpeg", 63.062))
+
+    def test_source_section_trim_resets_video_and_audio_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            root = Path(tmp_text)
+            source = root / "input" / "example.mkv"
+            source.parent.mkdir()
+            source.write_bytes(b"source")
+            settings = {
+                "global": {
+                    "source": str(source),
+                    "section_start": "12",
+                    "section_end": "24",
+                }
+            }
+            ffmpeg_commands: list[list[str]] = []
+
+            def fake_run(command, **_kwargs):
+                if command[0] == "ffprobe":
+                    return subprocess.CompletedProcess(command, 0, stdout='{"streams":[{"index":1}]}', stderr="")
+                ffmpeg_commands.append(command)
+                Path(command[-1]).write_bytes(b"trimmed")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(media, "ROOT", root),
+                mock.patch.object(media, "local_tool", return_value="ffmpeg"),
+                mock.patch.object(media.subprocess, "run", side_effect=fake_run),
+            ):
+                output = media.ensure_source_section_clip(settings)
+
+            self.assertIn("intermediate/source_sections/example_", output)
+            self.assertEqual(len(ffmpeg_commands), 1)
+            command = ffmpeg_commands[0]
+            self.assertIn("-vf", command)
+            self.assertEqual(command[command.index("-vf") + 1], "setpts=PTS-STARTPTS")
+            self.assertIn("-af", command)
+            self.assertEqual(command[command.index("-af") + 1], "asetpts=PTS-STARTPTS")
+            self.assertEqual(command[command.index("-c:a") + 1], "aac")
+            self.assertNotIn("copy", command)
 
     def test_opening_source_resets_trim_to_source_duration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
