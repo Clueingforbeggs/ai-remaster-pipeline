@@ -73,3 +73,11 @@ def parse_aspect(value: str) -> float:
         left, right = value.split(":", 1)
         return float(left) / float(right)
     return float(value)
+
+
+def format_timecode(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"

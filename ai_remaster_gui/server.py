@@ -43,7 +43,8 @@ from .manifests import (
     write_outpaint_chunk_rows,
 )
 from .models import COLORIZE_STAGE_KEYS, STAGES, Stage, output_stage
-from .paths import even_int, newest, rel, resolve, resolve_video_source, safe_stem
+from .paths import even_int, format_timecode, newest, rel, resolve, resolve_video_source, safe_stem
+from .naming import manifest_for_outpainted
 from .project_io import (
     last_browse_dir,
     project_default_path,
@@ -74,7 +75,6 @@ from .references import (
     delete_color_reference,
     extract_reference_frame,
     file_mtime,
-    format_timecode,
     install_custom_color_reference,
     manifest_fps,
     merge_manifest_shots,
@@ -97,7 +97,6 @@ from .references import (
     shot_views,
     update_shot_boundary,
     update_shot_fade,
-    bind_context as bind_references_context,
 )
 from .file_dialogs import (
     applescript_quote,
@@ -191,7 +190,6 @@ from .media import (
     video_dimensions,
     video_metrics,
     media_clip_path,
-    bind_context as bind_media_context,
 )
 
 MODEL_SIZE_MULTIPLE = 32
@@ -1848,14 +1846,6 @@ def _outpaint_crop_black(values: dict[str, str]) -> tuple[list[int], bool]:
     return crop, black
 
 
-def manifest_for_outpainted(outpainted_text: str) -> str:
-    if not outpainted_text:
-        return ""
-    outpainted = resolve(outpainted_text)
-    ident = aid.shots_identity(outpainted.stem)
-    return rel(ROOT / "manifests" / "references" / aid.artifact_name(aid.source_word(outpainted.name), "shots", ident, "csv"))
-
-
 def outpaint_output_for(source_text: str, aspect: str, target_height_text: str = "720") -> str:
     if not source_text:
         return ""
@@ -2559,8 +2549,6 @@ def clear_outpaint_end_guide(index: int) -> dict[str, str]:
 
 from .http_handler import Handler, bind_context as bind_http_handler_context
 
-bind_media_context(globals())
-bind_references_context(globals())
 bind_outpaint_guides_context(globals())
 bind_http_handler_context(globals())
 
