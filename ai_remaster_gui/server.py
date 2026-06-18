@@ -120,7 +120,6 @@ from .lifecycle import (
     request_quit,
     start_comfy_if_needed,
     stop_started_comfy,
-    bind_context as bind_lifecycle_context,
 )
 from .outpaint_guides import (
     _build_guide_frames_view,
@@ -206,6 +205,8 @@ STABLE_AUDIO_DEFAULT_CHECKPOINT = "stable_audio_open_1.0.safetensors"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 import artifact_ids as aid  # noqa: E402
+
+from . import state  # shared singleton registry; sibling modules read state.APP
 
 
 def is_true(values: dict[str, str], key: str, default: str = "false") -> bool:
@@ -1798,6 +1799,7 @@ class PipelineApp:
 
 
 APP = PipelineApp()
+state.APP = APP  # register the singleton so sibling modules can reach it without importing server
 
 
 
@@ -2564,7 +2566,6 @@ bind_project_context(globals())
 bind_media_context(globals())
 bind_references_context(globals())
 bind_file_dialogs_context(globals())
-bind_lifecycle_context(globals())
 bind_outpaint_guides_context(globals())
 bind_http_handler_context(globals())
 

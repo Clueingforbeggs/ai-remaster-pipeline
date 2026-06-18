@@ -18,10 +18,6 @@ STARTED_COMFY_PROCESS: subprocess.Popen | None = None
 COMFY_STARTUP_LOG = ROOT / "output" / "logs" / "comfyui-startup.log"
 
 
-def bind_context(context: dict) -> None:
-    globals().update(context)
-
-
 def ensure_comfy_available_for_stage(stage_title: str) -> tuple[bool, str]:
     if os.environ.get("AI_REMASTER_NO_COMFY_AUTOSTART") == "1":
         return True, ""
