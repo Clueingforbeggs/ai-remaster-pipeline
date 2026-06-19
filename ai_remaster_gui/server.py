@@ -145,7 +145,7 @@ from .outpaint_guides import (
 )
 from .cache import cache_state, delete_cache_category, delete_cache_file, human_size
 from .runtime_settings import APP_VERSION, default_qwen_workflow, load_settings, qwen_masked_workflow_for, qwen_workflow_for
-from .system_status import system_status
+from .system_status import flashvsr_hardware_warning, system_status
 from .media import (
     aspect_preview,
     aspect_preview_at,
@@ -1256,6 +1256,9 @@ class PipelineApp:
             self.hydrate_stage_inputs("upscale")
             if not self.upscale_input_for():
                 return False, "Upscaling input is not available yet. Choose source material, or run Recomposition first when earlier phases are enabled."
+            warning = flashvsr_hardware_warning()
+            if warning:
+                return False, warning
         values = self.settings[stage_key]
         missing = [key for key in stage.required if not values.get(key)]
         if stage_key == "outpaint" and not self.settings.get("global", {}).get("source"):
@@ -1595,6 +1598,9 @@ class PipelineApp:
         source_text = self.upscale_input_for() or values.get("input_video")
         if not source_text:
             return False, "Choose a source and enable Upscale before generating a preview."
+        warning = flashvsr_hardware_warning()
+        if warning:
+            return False, warning
         seconds = max(0.1, float(values.get("preview_seconds", "6") or 6))
         try:
             source, start, end, key = self.upscale_preview_clip_source(seconds)

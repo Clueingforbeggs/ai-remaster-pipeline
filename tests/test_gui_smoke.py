@@ -44,6 +44,7 @@ from ai_remaster_gui import outpaint_guides
 from ai_remaster_gui import project_io
 from ai_remaster_gui import sam_masks
 from ai_remaster_gui import server
+from ai_remaster_gui import system_status
 
 
 class GuiSmokeTests(unittest.TestCase):
@@ -2424,6 +2425,35 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("Run Recomposition first", message)
+
+    def test_upscale_stage_stops_before_comfy_on_unsupported_flashvsr_gpu(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+
+        with (
+            mock.patch.object(server, "flashvsr_hardware_warning", return_value="Unsupported FlashVSR GPU"),
+            mock.patch.object(server, "ensure_comfy_available_for_stage") as ensure_comfy,
+        ):
+            ok, message = app.APP.run_stage("upscale")
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "Unsupported FlashVSR GPU")
+        ensure_comfy.assert_not_called()
+
+    def test_upscale_preview_stops_on_unsupported_flashvsr_gpu(self) -> None:
+        app.APP.settings["global"].update({"source": "input/example.mp4", "expand_outpaint": "false", "colorize": "false", "upscale": "true", "section_start": "0", "section_end": ""})
+
+        with mock.patch.object(server, "flashvsr_hardware_warning", return_value="Unsupported FlashVSR GPU"):
+            ok, message = app.APP.run_upscale_preview()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "Unsupported FlashVSR GPU")
+
+    def test_flashvsr_hardware_warning_flags_pascal_gpu(self) -> None:
+        message = system_status.flashvsr_hardware_warning("NVIDIA GeForce GTX 1050", (6, 1))
+
+        self.assertIn("compute capability 6.1", message)
+        self.assertIn("FlashVSR upscaling requires NVIDIA compute capability 7.5+", message)
+        self.assertEqual(system_status.flashvsr_hardware_warning("NVIDIA GeForce RTX 2080", (7, 5)), "")
 
     def test_outpaint_hydration_does_not_pick_stale_newest_output_for_new_source(self) -> None:
         app.APP.settings["global"].update({"source": "input/new-source.mp4", "expand_outpaint": "true", "colorize": "false", "upscale": "false", "section_start": "0", "section_end": ""})
