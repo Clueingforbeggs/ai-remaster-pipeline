@@ -46,6 +46,7 @@ from .models import COLORIZE_STAGE_KEYS, STAGES, Stage, output_stage
 from .paths import even_int, format_timecode, newest, rel, resolve, resolve_served, resolve_video_source, safe_stem
 from .naming import manifest_for_outpainted
 from .project_io import (
+    bind_context as bind_project_io_context,
     last_browse_dir,
     project_default_path,
     project_payload,
@@ -2003,6 +2004,7 @@ def outpaint_chunks_state(settings: dict) -> dict:
         overlap_frames = 8
     chunk_dir = outpaint_chunk_dir_for(source_text, values)
     manifest = resolve(outpaint_chunk_manifest_for(source_text, values))
+    values["manifest"] = rel(manifest)
     existing = read_outpaint_chunk_rows(manifest)
     ranges = outpaint_chunk_ranges(total_frames, fps, chunk_seconds, overlap_frames, existing)
     global_prompt = values.get("prompt") or OUTPAINT_PROMPT
@@ -2328,6 +2330,7 @@ def clear_outpaint_end_guide(index: int) -> dict[str, str]:
 from .http_handler import Handler, bind_context as bind_http_handler_context
 
 bind_outpaint_guides_context(globals())
+bind_project_io_context(globals())
 bind_http_handler_context(globals())
 
 
