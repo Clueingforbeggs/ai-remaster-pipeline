@@ -76,19 +76,36 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
     fps = manifest_fps(path)
     out: list[dict[str, object]] = []
     start = 0.0
+    start_frame = 0
     for index, row in enumerate(rows):
+        row_start_frame = optional_int(row.get("start_frame"))
+        row_end_frame = optional_int(row.get("end_frame"))
+        if row_start_frame is not None:
+            start_frame = max(0, row_start_frame)
+            start = start_frame / fps
         end = parse_time_seconds(row.get("end", "")) or start
-        selected = selected_seconds_from_reference(row.get("source_reference", "")) or ((start + end) / 2 if end > start else start)
+        if row_end_frame is not None:
+            end_frame_exclusive = max(start_frame + 1, row_end_frame)
+            end = end_frame_exclusive / fps
+        else:
+            end_frame_exclusive = max(start_frame + 1, int(round(end * fps)))
+        selected_frame = optional_int(row.get("selected_frame"))
+        selected = (selected_frame / fps) if selected_frame is not None else selected_seconds_from_reference(row.get("source_reference", "")) or ((start + end) / 2 if end > start else start)
         selected = max(start, min(end, selected))
         item = {
                 "index": index,
                 "enabled": row.get("enabled", "true"),
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "start_frame": int(round(start * fps)),
-                "end_frame": max(0, int(round(end * fps)) - 1),
+                "start": round(start, 6),
+                "end": round(end, 6),
+                "fps": fps,
+                "previous_start_frame": out[-1]["start_frame"] if out else 0,
+                "start_frame": start_frame,
+                "end_frame": max(start_frame, end_frame_exclusive - 1),
+                "end_boundary_frame": end_frame_exclusive,
+                "next_end_boundary_frame": optional_int(rows[index + 1].get("end_frame")) if index + 1 < len(rows) else end_frame_exclusive + 1,
                 "duration": round(max(0.0, end - start), 3),
                 "selected_time": round(selected, 3),
+                "selected_frame": selected_frame if selected_frame is not None else int(round(selected * fps)),
                 "start_label": format_timecode(start),
                 "end_label": format_timecode(end),
                 "selected_label": format_timecode(selected),
@@ -108,12 +125,14 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
             }
         if include_previews:
             mid = (start + end) / 2 if end > start else start
-            for key, value in (("start_preview", start), ("middle_preview", mid), ("end_preview", max(start, end - (1 / max(1.0, fps))))):
+            end_preview = max(start, (end_frame_exclusive - 1) / fps)
+            for key, value in (("start_preview", start), ("middle_preview", mid), ("end_preview", end_preview)):
                 try:
                     item[key] = preview_reference_frame(manifest_text, index, value)
                 except Exception:
                     item[key] = ""
         out.append(item)
+        start_frame = end_frame_exclusive
         start = end
     return out
 
@@ -374,6 +393,15 @@ def parse_time_seconds(value: str) -> float:
     except ValueError:
         return 0.0
 
+def optional_int(value) -> int | None:
+    try:
+        text = str(value).strip()
+        if text == "":
+            return None
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
 def selected_seconds_from_reference(path_text: str) -> float:
     stem = Path(path_text).stem
     parts = stem.split("_")
@@ -597,6 +625,32 @@ def regenerate_reference_image(manifest_text: str, index: int) -> dict[str, str]
     state.APP.log.append(f"Regenerated colour reference for shot {index + 1}: {output}")
     return {"color_reference": output}
 
+def manifest_frame_spans(manifest: Path, rows: list[dict[str, str]], fps: float) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start_frame = 0
+    for row in rows:
+        row_start = optional_int(row.get("start_frame"))
+        row_end = optional_int(row.get("end_frame"))
+        if row_start is not None:
+            start_frame = max(0, row_start)
+        if row_end is None:
+            end_seconds = parse_time_seconds(row.get("end", ""))
+            row_end = max(start_frame + 1, int(round(end_seconds * fps)))
+        end_frame = max(start_frame + 1, row_end)
+        spans.append((start_frame, end_frame))
+        start_frame = end_frame
+    return spans
+
+def ensure_frame_fields(fieldnames: list[str]) -> None:
+    for key in ("start_frame", "end_frame"):
+        if key not in fieldnames:
+            fieldnames.append(key)
+
+def set_row_span(row: dict[str, str], start_frame: int, end_frame: int, fps: float) -> None:
+    row["start_frame"] = str(max(0, int(start_frame)))
+    row["end_frame"] = str(max(int(start_frame) + 1, int(end_frame)))
+    row["end"] = format_timecode(int(row["end_frame"]) / fps)
+
 
 def merge_manifest_shots(manifest_text: str, index: int) -> dict[str, str]:
     manifest = resolve(manifest_text)
@@ -606,7 +660,11 @@ def merge_manifest_shots(manifest_text: str, index: int) -> dict[str, str]:
     for key in ("fade_to_next", "crossfade_seconds"):
         if key not in fieldnames:
             fieldnames.append(key)
+    fps = manifest_fps(manifest)
+    spans = manifest_frame_spans(manifest, rows, fps)
     rows[index]["end"] = rows[index + 1].get("end", rows[index].get("end", ""))
+    ensure_frame_fields(fieldnames)
+    set_row_span(rows[index], spans[index][0], spans[index + 1][1], fps)
     rows[index]["fade_to_next"] = rows[index + 1].get("fade_to_next", "")
     rows[index]["crossfade_seconds"] = rows[index + 1].get("crossfade_seconds", "")
     removed = rows.pop(index + 1)
@@ -624,8 +682,11 @@ def split_manifest_shot(manifest_text: str, index: int, seconds: float | None = 
         if key not in fieldnames:
             fieldnames.append(key)
 
-    start = parse_time_seconds(rows[index - 1].get("end", "")) if index > 0 else 0.0
-    end = parse_time_seconds(rows[index].get("end", ""))
+    fps = manifest_fps(manifest)
+    spans = manifest_frame_spans(manifest, rows, fps)
+    start_frame, end_frame = spans[index]
+    start = start_frame / fps
+    end = end_frame / fps
     if end <= start:
         raise RuntimeError(f"Shot {index + 1} cannot be split because its duration is not valid.")
 
@@ -633,14 +694,21 @@ def split_manifest_shot(manifest_text: str, index: int, seconds: float | None = 
     split_at = max(start + 0.001, min(end - 0.001, split_at))
     if end - start < 0.1:
         raise RuntimeError(f"Shot {index + 1} is too short to split.")
+    split_frame = max(start_frame + 1, min(end_frame - 1, int(round(split_at * fps))))
+    split_at = split_frame / fps
 
     first = dict(rows[index])
     second = dict(rows[index])
+    ensure_frame_fields(fieldnames)
+    first["start_frame"] = str(start_frame)
+    first["end_frame"] = str(split_frame)
     first["end"] = format_timecode(split_at)
     first["source_reference"] = ""
     first["color_reference"] = ""
     first["fade_to_next"] = "false"
     first["crossfade_seconds"] = ""
+    second["start_frame"] = str(split_frame)
+    second["end_frame"] = str(end_frame)
     second["end"] = rows[index].get("end", "")
     second["source_reference"] = ""
     second["color_reference"] = ""
@@ -650,29 +718,37 @@ def split_manifest_shot(manifest_text: str, index: int, seconds: float | None = 
     state.APP.log.append(f"Split shot {index + 1} at {format_timecode(split_at)}")
     return {"manifest": rel(manifest), "split": format_timecode(split_at)}
 
-def update_shot_boundary(manifest_text: str, index: int, edge: str, seconds: float) -> dict[str, str]:
+def update_shot_boundary(manifest_text: str, index: int, edge: str, seconds: float, frame: int | None = None) -> dict[str, str]:
     manifest = resolve(manifest_text)
     source_video, fieldnames, rows = read_manifest_details(manifest)
     if index < 0 or index >= len(rows):
         raise IndexError(f"Manifest row {index} is out of range.")
+    fps = manifest_fps(manifest)
+    spans = manifest_frame_spans(manifest, rows, fps)
+    ensure_frame_fields(fieldnames)
+    requested = int(frame) if frame is not None else int(round(seconds * fps))
     if edge == "start":
         if index == 0:
             raise RuntimeError("The first shot must start at 00:00:00.")
-        previous_start = parse_time_seconds(rows[index - 2].get("end", "")) if index > 1 else 0.0
-        current_end = parse_time_seconds(rows[index].get("end", ""))
-        seconds = max(previous_start, min(current_end - 0.001, seconds))
-        rows[index - 1]["end"] = format_timecode(seconds)
+        previous_start_frame = spans[index - 1][0]
+        current_end_frame = spans[index][1]
+        boundary = max(previous_start_frame + 1, min(current_end_frame - 1, requested))
+        set_row_span(rows[index - 1], previous_start_frame, boundary, fps)
+        set_row_span(rows[index], boundary, current_end_frame, fps)
     elif edge == "end":
-        start = parse_time_seconds(rows[index - 1].get("end", "")) if index > 0 else 0.0
-        next_end = parse_time_seconds(rows[index + 1].get("end", "")) if index + 1 < len(rows) else seconds
-        upper = max(start + 0.001, next_end)
-        seconds = max(start + 0.001, min(upper, seconds))
-        rows[index]["end"] = format_timecode(seconds)
+        start_frame, current_end_frame = spans[index]
+        next_end_frame = spans[index + 1][1] if index + 1 < len(spans) else max(current_end_frame, requested)
+        upper = next_end_frame - 1 if index + 1 < len(spans) else max(start_frame + 1, requested)
+        boundary = max(start_frame + 1, min(upper, requested))
+        set_row_span(rows[index], start_frame, boundary, fps)
+        if index + 1 < len(rows):
+            set_row_span(rows[index + 1], boundary, next_end_frame, fps)
     else:
         raise RuntimeError("Boundary edge must be start or end.")
     write_manifest_details(manifest, source_video, fieldnames, rows)
-    state.APP.log.append(f"Updated shot {index + 1} {edge} boundary to {format_timecode(seconds)}")
-    return {"manifest": rel(manifest), "time": format_timecode(seconds)}
+    seconds = boundary / fps
+    state.APP.log.append(f"Updated shot {index + 1} {edge} boundary to frame {boundary} ({format_timecode(seconds)})")
+    return {"manifest": rel(manifest), "time": format_timecode(seconds), "frame": str(boundary)}
 
 def update_shot_fade(manifest_text: str, index: int, enabled: bool, crossfade_seconds: str) -> dict[str, str]:
     manifest = resolve(manifest_text)

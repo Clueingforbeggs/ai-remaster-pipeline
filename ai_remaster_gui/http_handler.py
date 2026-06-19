@@ -235,7 +235,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/shot-boundary":
             try:
-                result = update_shot_boundary(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("edge", "")), float(data.get("time", 0)))
+                frame = data.get("frame")
+                result = update_shot_boundary(
+                    str(data.get("manifest", "")),
+                    int(data.get("index", 0)),
+                    str(data.get("edge", "")),
+                    float(data.get("time", 0)),
+                    int(frame) if frame is not None and str(frame).strip() != "" else None,
+                )
                 self.send_json({"ok": True, **result, "state": APP.state("shots")})
             except Exception as exc:
                 APP.log.append(f"Shot boundary update failed: {exc}")

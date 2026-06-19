@@ -37,7 +37,7 @@ def signature(args):
             values[key + '_fingerprint'] = file_fingerprint(path)
     values.pop('ffmpeg', None)
     values['tool'] = 'final_composite.py'
-    values['version'] = 6
+    values['version'] = 7
     return values
 
 
@@ -153,8 +153,8 @@ def build_filter(args, has_color, fps: float):
     out_h = int(args.output_height) if args.output_height else 0
     scale_base = f",scale={out_w}:{out_h}:flags=lanczos" if (out_w and out_h) else ""
     filters = [
-        f'[0:v]fps=fps={fps_text},setpts=N/({fps_text}*TB){scale_base}[base0]',
-        f'[1:v]fps=fps={fps_text},{crop}setpts=N/({fps_text}*TB)[src0]',
+        f'[0:v]setpts=N/({fps_text}*TB),fps=fps={fps_text}{scale_base}[base0]',
+        f'[1:v]setpts=N/({fps_text}*TB),fps=fps={fps_text},{crop}setsar=1[src0]',
         '[src0][base0]scale2ref=w=trunc(oh*mdar/2)*2:h=ih[src][base]',
         f"[src]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{source_alpha_expr(args, feather)}'[srcm]",
         '[base][srcm]overlay=x=(W-w)/2:y=(H-h)/2[merged]',
@@ -162,7 +162,7 @@ def build_filter(args, has_color, fps: float):
     if has_color:
         red = max(temp, 0.0)
         blue = max(-temp, 0.0)
-        filters.append(f'[2:v]fps=fps={fps_text},setpts=N/({fps_text}*TB)[col0]')
+        filters.append(f'[2:v]setpts=N/({fps_text}*TB),fps=fps={fps_text}[col0]')
         filters.append('[col0][merged]scale2ref=w=iw:h=ih[colscaled][mergedref]')
         filters.append(f'[colscaled]eq=saturation={sat}:brightness=0:contrast=1,colorbalance=rs={red:.4f}:bs={blue:.4f},format=yuv444p[colfmt]')
         filters.append('[mergedref]format=yuv444p[basefmt]')

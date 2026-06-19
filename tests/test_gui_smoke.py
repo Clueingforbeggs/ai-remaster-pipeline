@@ -26,6 +26,7 @@ import common  # noqa: E402
 import colorize_video  # noqa: E402
 import create_audio_track  # noqa: E402
 import generate_single_reference  # noqa: E402
+import generate_references  # noqa: E402
 import guide_frame_utils  # noqa: E402
 import edit_reference_image  # noqa: E402
 import final_composite  # noqa: E402
@@ -278,6 +279,7 @@ class GuiSmokeTests(unittest.TestCase):
 
         filter_text = prepare_outpaint_input.build_filter(args, info, 1280, 704)
 
+        self.assertIn("trim=start_frame=0,setpts=N/(24.00000000*TB),fps=24.00000000", filter_text)
         self.assertIn("crop=w=1440:h=540:x=0:y=270,scale=w=960:h=360:flags=lanczos,scale=w=960:h=352:flags=lanczos", filter_text)
         self.assertNotIn("force_original_aspect_ratio=decrease", filter_text)
 
@@ -340,6 +342,8 @@ class GuiSmokeTests(unittest.TestCase):
 
         filter_text = final_composite.build_filter(args, has_color=False, fps=24.0)
 
+        self.assertIn("[0:v]setpts=N/(24.00000000*TB),fps=fps=24.00000000", filter_text)
+        self.assertIn("[1:v]setpts=N/(24.00000000*TB),fps=fps=24.00000000", filter_text)
         self.assertIn("a='if(lte(min(", filter_text)
         self.assertIn("min(max(X-2,0),W-1)", filter_text)
         self.assertIn(",12),0,", filter_text)
@@ -1181,6 +1185,80 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(plan[1]["start"], 18)
         self.assertEqual(plan[1]["end"], 48)
 
+    def test_shot_manifest_writes_integer_frame_spans(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "source.mp4"
+            manifest = folder / "shots.csv"
+            info = generate_references.VideoInfo(width=16, height=9, fps=24.0, frame_count=20, duration=20 / 24.0)
+            rows = [
+                generate_references.ReferenceRow(0, 0, 7, 3, 3 / 24.0, folder / "a.png", folder / "a_color.png"),
+                generate_references.ReferenceRow(1, 7, 20, 9, 9 / 24.0, folder / "b.png", folder / "b_color.png"),
+            ]
+
+            generate_references.write_manifest(manifest, source, rows, info)
+            _source, fields, read_rows = app.read_manifest_details(manifest)
+
+        self.assertIn("start_frame", fields)
+        self.assertIn("end_frame", fields)
+        self.assertIn("selected_frame", fields)
+        self.assertEqual(read_rows[0]["start_frame"], "0")
+        self.assertEqual(read_rows[0]["end_frame"], "7")
+        self.assertEqual(read_rows[1]["start_frame"], "7")
+
+    def test_shot_rows_prefer_manifest_frames_over_rounded_seconds(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            manifest = Path(tmp_text) / "shots.csv"
+            with manifest.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["enabled", "start_frame", "end_frame", "selected_frame", "end", "source_reference", "color_reference"],
+                )
+                writer.writeheader()
+                writer.writerow({"enabled": "true", "start_frame": "0", "end_frame": "7", "selected_frame": "3", "end": "0.250"})
+                writer.writerow({"enabled": "true", "start_frame": "7", "end_frame": "20", "selected_frame": "9", "end": "0.833"})
+
+            rows = app.shot_rows(str(manifest))
+
+        self.assertEqual(rows[0]["start_frame"], 0)
+        self.assertEqual(rows[0]["end_boundary_frame"], 7)
+        self.assertEqual(rows[1]["start_frame"], 7)
+        self.assertEqual(rows[1]["selected_frame"], 9)
+
+    def test_colorize_plan_prefers_manifest_frames_over_rounded_seconds(self) -> None:
+        rows = [
+            {"start_frame": "0", "end_frame": "7", "end": "0.250"},
+            {"start_frame": "7", "end_frame": "20", "end": "0.833"},
+        ]
+
+        plan, transitions = colorize_video.shot_plan(rows, total_frames=20, fps=24.0)
+
+        self.assertEqual(transitions, [0, 0])
+        self.assertEqual(plan[0]["base_start"], 0)
+        self.assertEqual(plan[0]["base_end"], 7)
+        self.assertEqual(plan[1]["base_start"], 7)
+        self.assertEqual(plan[1]["base_end"], 20)
+
+    def test_colorize_crossfade_rebuilds_frame_timestamps_before_fps(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            chunks = [folder / "a.mp4", folder / "b.mp4"]
+            for chunk in chunks:
+                chunk.write_bytes(b"placeholder")
+            output = folder / "xfade.mp4"
+
+            with (
+                mock.patch.object(colorize_video, "video_info", return_value={"frames": 24}),
+                mock.patch.object(colorize_video.subprocess, "run") as run,
+                mock.patch.object(colorize_video, "replace_with_retry"),
+            ):
+                colorize_video.xfade_group("ffmpeg", chunks, [6], output, 24.0)
+
+        command = run.call_args.args[0]
+        filter_text = command[command.index("-filter_complex") + 1]
+        self.assertIn("[0:v]setpts=N/(24.00000000*TB),fps=fps=24.00000000[v0]", filter_text)
+        self.assertIn("[1:v]setpts=N/(24.00000000*TB),fps=fps=24.00000000[v1]", filter_text)
+
     def test_outpaint_overlap_context_stops_before_guide_inside_overlap(self) -> None:
         self.assertEqual(outpaint_video.overlap_context_before_anchor(8, "0.125", 24.0, 100), 3)
         self.assertEqual(outpaint_video.overlap_context_before_anchor(8, "1.0", 24.0, 100), 8)
@@ -1739,6 +1817,44 @@ class GuiSmokeTests(unittest.TestCase):
             encode_source("blue")
             upscale_video.split_video_chunk(ffmpeg, source, target, 0, 4, 8.0, False, common.file_fingerprint(source))
             self.assertNotEqual(common.file_fingerprint(target)["sha256"], first["sha256"])
+
+    def test_upscale_chunk_split_uses_frame_index_trim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "src.mp4"
+            target = folder / "input_0000.mp4"
+            source.write_bytes(b"placeholder")
+            fingerprint = common.file_fingerprint(source)
+
+            with (
+                mock.patch.object(upscale_video, "split_matches_source", return_value=False),
+                mock.patch.object(upscale_video.subprocess, "run") as run,
+                mock.patch.object(upscale_video, "replace_unless_identical"),
+                mock.patch.object(upscale_video, "write_split_sidecar"),
+            ):
+                upscale_video.split_video_chunk("ffmpeg", source, target, 7, 19, 23.97602398, False, fingerprint)
+
+        command = run.call_args.args[0]
+        self.assertNotIn("-ss", command)
+        self.assertNotIn("-t", command)
+        self.assertEqual(command[command.index("-vf") + 1], "trim=start_frame=7:end_frame=19,setpts=N/(23.97602398*TB),fps=23.97602398,setsar=1")
+
+    def test_upscale_normalize_chunk_rebuilds_frame_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "raw.mp4"
+            target = folder / "final.mp4"
+            source.write_bytes(b"placeholder")
+
+            with (
+                mock.patch.object(upscale_video.subprocess, "run") as run,
+                mock.patch.object(upscale_video, "replace_with_retry"),
+            ):
+                upscale_video.normalize_chunk("ffmpeg", source, target, 1920, 1080, 4, 23.97602398, True)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("-vf") + 1], "trim=start_frame=4,setpts=N/(23.97602398*TB),fps=23.97602398,scale=1920:1080:flags=lanczos,setsar=1")
+        self.assertIn("-fps_mode", command)
 
     def test_write_manifest_details_skips_identical_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:

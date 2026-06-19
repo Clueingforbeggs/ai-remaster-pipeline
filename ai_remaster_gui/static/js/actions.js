@@ -903,8 +903,12 @@ async function splitShot(manifest, index) {
   await redrawWithState(result.state, snap, true);
 }
 
-async function setShotBoundary(manifest, index, edge, time) {
-  const result = await postJson('/api/shot-boundary', { manifest, index, edge, time });
+async function setShotBoundary(manifest, index, edge, frame) {
+  const rows = (state.shot_views && state.shot_views.shots) || [];
+  const row = rows[index] || {};
+  const fps = Math.max(1, Number(row.fps || 24));
+  const numericFrame = Math.max(0, Math.round(Number(frame) || 0));
+  const result = await postJson('/api/shot-boundary', { manifest, index, edge, frame: numericFrame, time: numericFrame / fps });
   if (!result.ok) return alert(result.error || 'Could not update shot boundary');
 
   state = result.state || await api(stateUrl());
@@ -927,11 +931,8 @@ function nudgeShotBoundary(manifest, index, edge, frames) {
   const row = rows[index];
   if (!row) return;
 
-  const frameCount = Number(row.end_frame) - Number(row.start_frame) + 1;
-  const duration = Math.max(0.001, Number(row.end) - Number(row.start));
-  const fps = Math.max(1, frameCount / duration);
-  const base = edge === 'start' ? Number(row.start) : Number(row.end);
-  setShotBoundary(manifest, index, edge, base + (Number(frames) || 0) / fps);
+  const base = edge === 'start' ? Number(row.start_frame) : Number(row.end_boundary_frame || (Number(row.end_frame) + 1));
+  setShotBoundary(manifest, index, edge, base + (Number(frames) || 0));
 }
 
 const previewTimers = {};
@@ -950,16 +951,18 @@ function updateShotPreview(manifest, index, time, imgId, labelId) {
   }, 180);
 }
 
-function updateShotBoundaryPreview(manifest, index, time, imgId, labelId, dataset) {
+function updateShotBoundaryPreview(manifest, index, frame, imgId, labelId, dataset) {
   const label = document.getElementById(labelId);
   const edge = dataset && dataset.edge === 'end' ? 'End' : 'Start';
   const fps = Math.max(1, Number((dataset && dataset.fps) || 24));
-  const frame = Math.max(0, Math.round(Number(time || 0) * fps) - (edge === 'End' ? 1 : 0));
-  if (label) label.textContent = `${edge} frame ${frame}`;
+  const boundaryFrame = Math.max(0, Math.round(Number(frame || 0)));
+  const displayFrame = edge === 'End' ? Math.max(0, boundaryFrame - 1) : boundaryFrame;
+  if (label) label.textContent = `${edge} frame ${displayFrame}`;
 
   clearTimeout(previewTimers[imgId]);
   previewTimers[imgId] = setTimeout(async () => {
-    const previewTime = Math.max(0, Number(time || 0) + Number((dataset && dataset.previewOffset) || 0));
+    const previewFrame = Math.max(0, boundaryFrame + Number((dataset && dataset.previewOffsetFrames) || 0));
+    const previewTime = previewFrame / fps;
     const query = '?manifest=' + encodeURIComponent(manifest)
       + '&index=' + index
       + '&time=' + encodeURIComponent(previewTime);

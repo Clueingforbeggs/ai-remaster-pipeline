@@ -229,34 +229,32 @@ function shotTransitionControl(mode, manifest, row) {
 
 function boundaryFrameCard({ manifest, row, idx }, edge) {
   const isStart = edge === 'start';
-  const frame = isStart ? row.start_frame : row.end_frame;
+  const frame = isStart ? Number(row.start_frame || 0) : Number(row.end_boundary_frame || (Number(row.end_frame || 0) + 1));
+  const displayFrame = isStart ? frame : Math.max(0, frame - 1);
   const preview = isStart ? row.start_preview : row.end_preview;
-  const value = isStart ? row.start : row.end;
-  const min = isStart ? Math.max(0, Number(row.start) - 1) : row.start;
-  const max = isStart ? row.end : Number(row.end) + 1;
+  const min = isStart ? Math.max(0, Number(row.previous_start_frame ?? (Number(row.start_frame || 0) - 1)) + 1) : Number(row.start_frame || 0) + 1;
+  const max = isStart ? Number(row.end_boundary_frame || (Number(row.end_frame || 0) + 1)) - 1 : Number(row.next_end_boundary_frame ?? (frame + 1)) - 1;
   const disabled = isStart && idx === 0 ? 'disabled' : '';
   const label = isStart ? 'Start' : 'End';
-  const fps = Math.max(1, Number(row.end_frame) - Number(row.start_frame) + 1) / Math.max(0.001, Number(row.end) - Number(row.start));
+  const fps = Math.max(1, Number(row.fps || 24));
   const imgId = `shotBoundaryImg_${edge}_${idx}`;
   const labelId = `shotBoundaryLabel_${edge}_${idx}`;
-  const previewOffset = isStart ? 0 : -(1 / fps);
-
-  const step = (1 / Math.max(1, fps)).toFixed(6);
+  const previewOffsetFrames = isStart ? 0 : -1;
 
   return `
     <div>
-      <label id="${labelId}">${label} frame ${frame ?? ''}</label>
+      <label id="${labelId}">${label} frame ${displayFrame}</label>
       ${preview ? `<img id="${imgId}" src="${media(preview)}" alt="">` : missingImage('Image not present')}
       <input
         type="range"
         min="${min}"
         max="${max}"
-        step="${step}"
-        value="${value}"
+        step="1"
+        value="${frame}"
         ${disabled}
         data-edge="${edge}"
         data-fps="${fps}"
-        data-preview-offset="${previewOffset}"
+        data-preview-offset-frames="${previewOffsetFrames}"
         oninput="updateShotBoundaryPreview('${esc(manifest)}',${idx},this.value,'${imgId}','${labelId}',this.dataset)"
         onchange="setShotBoundary('${esc(manifest)}',${idx},'${edge}',this.value)"
       >
