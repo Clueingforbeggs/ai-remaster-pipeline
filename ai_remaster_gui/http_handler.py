@@ -278,6 +278,30 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _send_result(self, label: str, produce) -> None:
+        """Success path for endpoints answering {"ok": True, **<dict>}. produce() returns that
+        dict; on any error, log "<label> failed: …" and answer {"ok": False, "error": …}."""
+        try:
+            self.send_json({"ok": True, **produce()})
+        except Exception as exc:
+            state.APP.log.append(f"{label} failed: {exc}")
+            self.send_json({"ok": False, "error": str(exc)})
+
+    def _send_action(self, label: str, run, view: str = "", extra_key: str | None = None) -> None:
+        """Success path for APP.run_* endpoints returning (ok, message) or (ok, message, value):
+        answer {ok, message, state, error}, including fresh state only when ok and the optional
+        third value under extra_key. On error, same log + error response as _send_result."""
+        try:
+            result = run()
+            ok, message = result[0], result[1]
+            payload = {"ok": ok, "message": message, "state": state.APP.state(view) if ok else None, "error": "" if ok else message}
+            if extra_key is not None:
+                payload[extra_key] = result[2]
+            self.send_json(payload)
+        except Exception as exc:
+            state.APP.log.append(f"{label} failed: {exc}")
+            self.send_json({"ok": False, "error": str(exc)})
+
     def do_POST(self) -> None:  # noqa: N802
         if not self.request_host_is_local() or not self.request_origin_is_local():
             self.send_error(403)
@@ -288,10 +312,7 @@ class Handler(BaseHTTPRequestHandler):
             state.APP.update_settings(str(data.get("stage", "")), data.get("values", {}))
             self.send_json({"ok": True})
         elif parsed.path == "/api/run":
-            if data.get("all"):
-                ok, message = state.APP.run_all()
-            else:
-                ok, message = state.APP.run_stage(str(data.get("stage", "")))
+            ok, message = state.APP.run_all() if data.get("all") else state.APP.run_stage(str(data.get("stage", "")))
             self.send_json({"ok": ok, "message": message})
         elif parsed.path == "/api/upscale-preview":
             ok, message = state.APP.run_upscale_preview()
@@ -310,341 +331,143 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             request_quit(self.server)
         elif parsed.path == "/api/shot-scrub":
-            try:
-                result = extract_reference_frame(str(data.get("manifest", "")), int(data.get("index", 0)), float(data.get("time", 0)))
-                self.send_json({"ok": True, **result})
-            except Exception as exc:
-                state.APP.log.append(f"Shot scrub failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot scrub", lambda: {**extract_reference_frame(str(data.get("manifest", "")), int(data.get("index", 0)), float(data.get("time", 0)))})
         elif parsed.path == "/api/shot-prompt":
-            try:
-                update_manifest_row(resolve(str(data.get("manifest", ""))), int(data.get("index", 0)), {"prompt": str(data.get("prompt", ""))})
-                self.send_json({"ok": True})
-            except Exception as exc:
-                state.APP.log.append(f"Shot prompt save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot prompt save", lambda: update_manifest_row(resolve(str(data.get("manifest", ""))), int(data.get("index", 0)), {"prompt": str(data.get("prompt", ""))}) or {})
         elif parsed.path == "/api/shot-enabled":
-            try:
-                enabled = "true" if data.get("enabled") else "false"
-                update_manifest_row(resolve(str(data.get("manifest", ""))), int(data.get("index", 0)), {"enabled": enabled})
-                self.send_json({"ok": True})
-            except Exception as exc:
-                state.APP.log.append(f"Shot enabled save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot enabled save", lambda: update_manifest_row(resolve(str(data.get("manifest", ""))), int(data.get("index", 0)), {"enabled": "true" if data.get("enabled") else "false"}) or {})
         elif parsed.path == "/api/shot-merge":
-            try:
-                result = merge_manifest_shots(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("shots")})
-            except Exception as exc:
-                state.APP.log.append(f"Shot merge failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot merge", lambda: {**merge_manifest_shots(str(data.get("manifest", "")), int(data.get("index", 0))), "state": state.APP.state("shots")})
         elif parsed.path == "/api/shot-split":
-            try:
-                result = split_manifest_shot(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("shots")})
-            except Exception as exc:
-                state.APP.log.append(f"Shot split failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot split", lambda: {**split_manifest_shot(str(data.get("manifest", "")), int(data.get("index", 0))), "state": state.APP.state("shots")})
         elif parsed.path == "/api/shot-boundary":
-            try:
-                frame = data.get("frame")
-                result = update_shot_boundary(
-                    str(data.get("manifest", "")),
-                    int(data.get("index", 0)),
-                    str(data.get("edge", "")),
-                    float(data.get("time", 0)),
-                    int(frame) if frame is not None and str(frame).strip() != "" else None,
-                )
-                self.send_json({"ok": True, **result, "state": state.APP.state("shots")})
-            except Exception as exc:
-                state.APP.log.append(f"Shot boundary update failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot boundary update", lambda: {**update_shot_boundary(
+                str(data.get("manifest", "")),
+                int(data.get("index", 0)),
+                str(data.get("edge", "")),
+                float(data.get("time", 0)),
+                int(data.get("frame")) if data.get("frame") is not None and str(data.get("frame")).strip() != "" else None,
+            ), "state": state.APP.state("shots")})
         elif parsed.path == "/api/shot-fade":
-            try:
-                result = update_shot_fade(str(data.get("manifest", "")), int(data.get("index", 0)), bool(data.get("enabled")), str(data.get("crossfade_seconds", "")))
-                self.send_json({"ok": True, **result, "state": state.APP.state("shots")})
-            except Exception as exc:
-                state.APP.log.append(f"Shot fade update failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Shot fade update", lambda: {**update_shot_fade(str(data.get("manifest", "")), int(data.get("index", 0)), bool(data.get("enabled")), str(data.get("crossfade_seconds", ""))), "state": state.APP.state("shots")})
         elif parsed.path == "/api/reference-regenerate":
-            try:
-                ok, message = state.APP.run_reference_regeneration(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("provider", "qwen")))
-                self.send_json({"ok": ok, "message": message, "state": state.APP.state() if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Reference regeneration failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Reference regeneration", lambda: state.APP.run_reference_regeneration(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("provider", "qwen"))))
         elif parsed.path == "/api/reference-delete":
-            try:
-                result = delete_color_reference(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state()})
-            except Exception as exc:
-                state.APP.log.append(f"Reference delete failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Reference delete", lambda: {**delete_color_reference(str(data.get("manifest", "")), int(data.get("index", 0))), "state": state.APP.state()})
         elif parsed.path == "/api/reference-custom":
-            try:
-                result = install_custom_color_reference(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state()})
-            except Exception as exc:
-                state.APP.log.append(f"Custom reference install failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Custom reference install", lambda: {**install_custom_color_reference(str(data.get("manifest", "")), int(data.get("index", 0))), "state": state.APP.state()})
         elif parsed.path == "/api/reference-mask-sam":
-            try:
-                result = sam_reference_mask(
-                    str(data.get("manifest", "")),
-                    int(data.get("index", 0)),
-                    data.get("points", []) if isinstance(data.get("points", []), list) else [],
-                    int(data.get("width", 1)),
-                    int(data.get("height", 1)),
-                    int(data.get("tolerance", 10)),
-                )
-                self.send_json({"ok": True, **result})
-            except Exception as exc:
-                state.APP.log.append(f"Reference smart mask failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Reference smart mask", lambda: {**sam_reference_mask(
+                str(data.get("manifest", "")),
+                int(data.get("index", 0)),
+                data.get("points", []) if isinstance(data.get("points", []), list) else [],
+                int(data.get("width", 1)),
+                int(data.get("height", 1)),
+                int(data.get("tolerance", 10)),
+            )})
         elif parsed.path == "/api/guide-frame-mask-sam":
-            try:
-                result = sam_guide_mask(
-                    int(data.get("chunk_index", 0)),
-                    int(data.get("guide_index", 0)),
-                    data.get("points", []) if isinstance(data.get("points", []), list) else [],
-                    int(data.get("width", 1)),
-                    int(data.get("height", 1)),
-                    str(data.get("fallback_path", "")),
-                )
-                self.send_json({"ok": True, **result})
-            except Exception as exc:
-                state.APP.log.append(f"Guide smart mask failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide smart mask", lambda: {**sam_guide_mask(
+                int(data.get("chunk_index", 0)),
+                int(data.get("guide_index", 0)),
+                data.get("points", []) if isinstance(data.get("points", []), list) else [],
+                int(data.get("width", 1)),
+                int(data.get("height", 1)),
+                str(data.get("fallback_path", "")),
+            )})
         elif parsed.path == "/api/reference-edit-preview":
-            try:
-                ok, message, output = state.APP.run_reference_edit_preview(
-                    str(data.get("manifest", "")),
-                    int(data.get("index", 0)),
-                    str(data.get("instruction", "")),
-                    str(data.get("mask", "")),
-                    str(data.get("sampled_color", "")),
-                )
-                self.send_json({"ok": ok, "message": message, "preview": output, "state": state.APP.state("references") if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Reference edit preview failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Reference edit preview", lambda: state.APP.run_reference_edit_preview(
+                str(data.get("manifest", "")),
+                int(data.get("index", 0)),
+                str(data.get("instruction", "")),
+                str(data.get("mask", "")),
+                str(data.get("sampled_color", "")),
+            ), view="references", extra_key="preview")
         elif parsed.path == "/api/reference-edit-accept":
-            try:
-                result = accept_reference_edit(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("preview", "")))
-                self.send_json({"ok": True, **result, "state": state.APP.state("references")})
-            except Exception as exc:
-                state.APP.log.append(f"Reference edit accept failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Reference edit accept", lambda: {**accept_reference_edit(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("preview", ""))), "state": state.APP.state("references")})
         elif parsed.path == "/api/reference-edit-revert":
-            try:
-                result = revert_reference_edit(str(data.get("manifest", "")), int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("references")})
-            except Exception as exc:
-                state.APP.log.append(f"Reference edit revert failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Reference edit revert", lambda: {**revert_reference_edit(str(data.get("manifest", "")), int(data.get("index", 0))), "state": state.APP.state("references")})
         elif parsed.path == "/api/reference-paint-save":
-            try:
-                result = save_reference_paint(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("image", "")))
-                self.send_json({"ok": True, **result, "state": state.APP.state("references")})
-            except Exception as exc:
-                state.APP.log.append(f"Reference paint save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Reference paint save", lambda: {**save_reference_paint(str(data.get("manifest", "")), int(data.get("index", 0)), str(data.get("image", ""))), "state": state.APP.state("references")})
         elif parsed.path == "/api/export-media":
-            try:
-                result = export_media_file(str(data.get("path", "")))
-                self.send_json({"ok": True, **result})
-            except Exception as exc:
-                state.APP.log.append(f"Media export failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Media export", lambda: {**export_media_file(str(data.get("path", "")))})
         elif parsed.path == "/api/outpaint-chunk":
-            try:
-                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0")))
-                self.send_json({"ok": True, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint chunk save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Outpaint chunk save", lambda: update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0"))) or {"state": state.APP.state("outpaint")})
         elif parsed.path == "/api/outpaint-chunk-regenerate":
-            try:
-                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0")))
-                ok, message = state.APP.run_outpaint_chunk(int(data.get("index", 0)))
-                self.send_json({"ok": ok, "message": message, "state": state.APP.state("outpaint") if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint chunk regeneration failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Outpaint chunk regeneration", lambda: (
+                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0"))),
+                state.APP.run_outpaint_chunk(int(data.get("index", 0))),
+            )[1], view="outpaint")
         elif parsed.path == "/api/outpaint-anchor":
-            try:
-                result = install_outpaint_guide(int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint guide install failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Outpaint guide install", lambda: {**install_outpaint_guide(int(data.get("index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/outpaint-anchor-clear":
-            try:
-                result = clear_outpaint_guide(int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint guide clear failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Outpaint guide clear", lambda: {**clear_outpaint_guide(int(data.get("index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/outpaint-anchor-generate":
-            try:
-                ok, message = state.APP.run_outpaint_guide_generation(
-                    int(data.get("index", 0)),
-                    str(data.get("prompt", "")),
-                )
-                self.send_json({"ok": ok, "message": message, "state": state.APP.state("outpaint") if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint guide generation failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Outpaint guide generation", lambda: state.APP.run_outpaint_guide_generation(int(data.get("index", 0)), str(data.get("prompt", ""))), view="outpaint")
         elif parsed.path == "/api/outpaint-end-anchor":
-            try:
-                result = install_outpaint_end_guide(int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint end guide install failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Outpaint end guide install", lambda: {**install_outpaint_end_guide(int(data.get("index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/outpaint-end-anchor-clear":
-            try:
-                result = clear_outpaint_end_guide(int(data.get("index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint end guide clear failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Outpaint end guide clear", lambda: {**clear_outpaint_end_guide(int(data.get("index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/outpaint-end-anchor-generate":
-            try:
-                ok, message = state.APP.run_outpaint_end_guide_generation(
-                    int(data.get("index", 0)),
-                    str(data.get("prompt", "")),
-                )
-                self.send_json({"ok": ok, "message": message, "state": state.APP.state("outpaint") if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Outpaint end guide generation failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Outpaint end guide generation", lambda: state.APP.run_outpaint_end_guide_generation(int(data.get("index", 0)), str(data.get("prompt", ""))), view="outpaint")
         elif parsed.path == "/api/guide-frame-add":
-            try:
-                result = add_guide_frame(int(data.get("chunk_index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame add failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame add", lambda: {**add_guide_frame(int(data.get("chunk_index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-frame-remove":
-            try:
-                result = remove_guide_frame(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame remove failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame remove", lambda: {**remove_guide_frame(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-frame-save":
-            try:
-                result = save_guide_frame(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), int(data.get("frame_idx", 0)), float(data.get("strength", 0.7)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame save", lambda: {**save_guide_frame(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), int(data.get("frame_idx", 0)), float(data.get("strength", 0.7))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-frame-upload":
-            try:
-                result = upload_guide_frame_image(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame upload failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame upload", lambda: {**upload_guide_frame_image(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-frame-clear":
-            try:
-                result = clear_guide_frame_image(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame clear failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame clear", lambda: {**clear_guide_frame_image(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-frame-generate":
-            try:
-                ok, message = state.APP.run_guide_frame_generation(
-                    int(data.get("chunk_index", 0)),
-                    int(data.get("guide_index", 0)),
-                    int(data.get("frame_idx", 0)),
-                    str(data.get("prompt", "")),
-                )
-                self.send_json({"ok": ok, "message": message, "state": state.APP.state("outpaint") if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame generation failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Guide frame generation", lambda: state.APP.run_guide_frame_generation(
+                int(data.get("chunk_index", 0)),
+                int(data.get("guide_index", 0)),
+                int(data.get("frame_idx", 0)),
+                str(data.get("prompt", "")),
+            ), view="outpaint")
         elif parsed.path == "/api/guide-frame-edit-preview":
-            try:
-                ok, message, preview = state.APP.run_guide_edit_preview(
-                    int(data.get("chunk_index", 0)),
-                    int(data.get("guide_index", 0)),
-                    str(data.get("instruction", "")),
-                    str(data.get("mask", "")),
-                    str(data.get("sampled_color", "")),
-                )
-                self.send_json({"ok": ok, "message": message, "preview": preview, "state": state.APP.state("outpaint") if ok else None, "error": "" if ok else message})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame edit preview failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_action("Guide frame edit preview", lambda: state.APP.run_guide_edit_preview(
+                int(data.get("chunk_index", 0)),
+                int(data.get("guide_index", 0)),
+                str(data.get("instruction", "")),
+                str(data.get("mask", "")),
+                str(data.get("sampled_color", "")),
+            ), view="outpaint", extra_key="preview")
         elif parsed.path == "/api/guide-frame-edit-accept":
-            try:
-                result = accept_guide_edit(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), str(data.get("preview", "")))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame edit accept failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame edit accept", lambda: {**accept_guide_edit(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), str(data.get("preview", ""))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-frame-edit-revert":
-            try:
-                result = revert_guide_edit(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide frame edit revert failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide frame edit revert", lambda: {**revert_guide_edit(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/guide-paint-save":
-            try:
-                result = save_guide_paint(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), str(data.get("image", "")))
-                self.send_json({"ok": True, **result, "state": state.APP.state("outpaint")})
-            except Exception as exc:
-                state.APP.log.append(f"Guide paint save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Guide paint save", lambda: {**save_guide_paint(int(data.get("chunk_index", 0)), int(data.get("guide_index", 0)), str(data.get("image", ""))), "state": state.APP.state("outpaint")})
         elif parsed.path == "/api/browse":
-            try:
-                selected = browse_path(str(data.get("kind", "file")), str(data.get("current", "")))
-                self.send_json({"ok": True, "path": selected})
-            except Exception as exc:
-                state.APP.log.append(f"Browse failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Browse", lambda: {"path": browse_path(str(data.get("kind", "file")), str(data.get("current", "")))})
         elif parsed.path == "/api/browse-global-source":
-            try:
+            def browse_global_source() -> dict:
                 selected = browse_path("file", str(data.get("current", "")))
                 if selected:
                     state.APP.update_settings("global", {"source": selected})
-                self.send_json({"ok": True, "path": selected, "state": state.APP.state("global")})
-            except Exception as exc:
-                state.APP.log.append(f"Browse failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+                return {"path": selected, "state": state.APP.state("global")}
+
+            self._send_result("Browse", browse_global_source)
         elif parsed.path == "/api/overview-clear":
             state.APP.clear_overview()
             self.send_json({"ok": True, "state": state.APP.state("global")})
         elif parsed.path == "/api/project-save":
-            try:
-                result = state.APP.save_project(bool(data.get("save_as")))
-                self.send_json({"ok": True, **result, "state": state.APP.state("global")})
-            except Exception as exc:
-                state.APP.log.append(f"Project save failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Project save", lambda: {**state.APP.save_project(bool(data.get("save_as"))), "state": state.APP.state("global")})
         elif parsed.path == "/api/project-load":
-            try:
-                result = state.APP.load_project()
-                self.send_json({"ok": True, **result, "state": state.APP.state("global")})
-            except Exception as exc:
-                state.APP.log.append(f"Project load failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+            self._send_result("Project load", lambda: {**state.APP.load_project(), "state": state.APP.state("global")})
         elif parsed.path == "/api/cache-delete":
-            try:
+            def cache_delete() -> dict:
                 if data.get("all"):
                     result = delete_cache_category("all")
                 elif data.get("category"):
                     result = delete_cache_category(str(data.get("category", "")))
                 else:
                     result = delete_cache_file(str(data.get("path", "")))
-                self.send_json({"ok": True, **result, "state": state.APP.state()})
-            except Exception as exc:
-                state.APP.log.append(f"Cache delete failed: {exc}")
-                self.send_json({"ok": False, "error": str(exc)})
+                return {**result, "state": state.APP.state()}
+
+            self._send_result("Cache delete", cache_delete)
         else:
             self.send_error(404)
 
