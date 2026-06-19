@@ -20,7 +20,6 @@ PROJECT_JSON_NAME = "project.json"
 BUNDLE_EXTS = IMAGE_EXTS | {".csv", ".txt", ".json"}
 
 
-
 def source_signature(source_text: str) -> tuple[str, int, int] | None:
     if not source_text:
         return None

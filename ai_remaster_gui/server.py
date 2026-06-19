@@ -328,15 +328,7 @@ def source_defaults_for(source: Path, monochrome: bool | None = None, info: dict
     return source_workflow_defaults(metadata, monochrome)
 
 
-
-
 DEFAULT_ANCHOR_PROMPT = "Replace the black bars."
-
-
-
-
-
-
 
 
 class PipelineApp:
@@ -1798,48 +1790,6 @@ APP = PipelineApp()
 state.APP = APP  # register the singleton so sibling modules can reach it without importing server
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _outpaint_crop_black(values: dict[str, str]) -> tuple[list[int], bool]:
     crop = [int(float(values.get(key, "0") or 0)) for key in ("crop_left", "crop_right", "crop_top", "crop_bottom")]
     black = is_true(values, "outpaint_all_black_regions")
@@ -2153,16 +2103,6 @@ def outpaint_chunk_preview(settings: dict, chunk_index: int, kind: str, position
     return aspect_preview_at(source_text, aspect, start_seconds + offset, offset_x, offset_y)
 
 
-
-
-
-
-
-
-
-
-
-
 def outpaint_chunk_ranges(total_frames: int, fps: float, default_seconds: float, overlap_frames: int, existing: dict[int, dict[str, str]]) -> list[tuple[int, int, int]]:
     ranges = []
     start = 0
@@ -2375,201 +2315,10 @@ def clear_outpaint_end_guide(index: int) -> dict[str, str]:
     return {"guide_end_image": ""}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 from .http_handler import Handler, bind_context as bind_http_handler_context
 
 bind_outpaint_guides_context(globals())
 bind_http_handler_context(globals())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 APP.normalize_loaded_source_state()
