@@ -13,10 +13,43 @@ def bind_context(context: dict) -> None:
     globals().update(context)
 
 
+# The GUI only ever serves the local user through their own browser. These are the host names a
+# loopback address answers to; anything else in the Host header means a remote site is trying to
+# reach us by name (a DNS-rebinding attack), so we refuse it.
+LOOPBACK_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+
+
+def served_source_paths() -> list[str]:
+    """The selected source video lives anywhere on disk, so its folder is added to the set of
+    directories the file-serving endpoints are allowed to read from."""
+    source = APP.settings.get("global", {}).get("source", "")
+    return [source] if source else []
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "AIRemasterGUI/1.0"
 
+    def request_host_is_local(self) -> bool:
+        """Reject requests whose Host header is not a loopback name. Blocks DNS rebinding, where a
+        page on attacker.com re-points its own domain at 127.0.0.1 to talk to this server."""
+        host = self.headers.get("Host", "")
+        if not host:
+            return True  # a missing Host cannot carry an attacker-controlled domain
+        return (urlparse("//" + host).hostname or "").lower() in LOOPBACK_HOSTNAMES
+
+    def request_origin_is_local(self) -> bool:
+        """Reject state-changing requests carrying a cross-origin Origin/Referer. Blocks CSRF, where
+        another site silently POSTs to our localhost endpoints from the user's browser."""
+        for header in ("Origin", "Referer"):
+            value = self.headers.get(header, "")
+            if value:
+                return (urlparse(value).hostname or "").lower() in LOOPBACK_HOSTNAMES
+        return True  # same-origin requests may omit both; the Host check still applies
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self.request_host_is_local():
+            self.send_error(403)
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/":
             self.send_static(STATIC_DIR / "index.html", "text/html; charset=utf-8")
@@ -55,8 +88,8 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/media-status":
             query = parse_qs(parsed.query)
             path_text = query.get("path", [""])[0]
-            path = resolve(path_text)
-            exists = path.is_file()
+            path = resolve_served(path_text, served_source_paths())
+            exists = bool(path and path.is_file())
             self.send_json(
                 {
                     "ok": True,
@@ -70,14 +103,19 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif parsed.path == "/api/comfy":
             url = parse_qs(parsed.query).get("url", ["http://127.0.0.1:8188"])[0].rstrip("/")
+            # Only reach out over HTTP(S). urlopen also speaks file://, ftp://, etc., which would
+            # turn this connectivity check into a way to read local files or probe other services.
+            if urlparse(url).scheme not in ("http", "https"):
+                self.send_json({"ok": False, "error": "ComfyUI URL must be http or https."})
+                return
             try:
                 with urlopen(url + "/queue", timeout=3) as response:
                     self.send_json({"ok": True, "queue": json.loads(response.read().decode("utf-8"))})
             except (URLError, OSError, TimeoutError, json.JSONDecodeError) as exc:
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/api/logfile":
-            path = resolve(parse_qs(parsed.query).get("path", [""])[0])
-            text = path.read_text(encoding="utf-8", errors="replace")[-12000:] if path.exists() else ""
+            path = resolve_served(parse_qs(parsed.query).get("path", [""])[0], served_source_paths())
+            text = path.read_text(encoding="utf-8", errors="replace")[-12000:] if path and path.exists() else ""
             self.send_json({"text": text})
         elif parsed.path == "/api/openai-models":
             token = APP.settings.get("references", {}).get("openai_api_key", "").strip()
@@ -155,7 +193,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)})
         elif parsed.path == "/media":
             query = parse_qs(parsed.query)
-            path = resolve(unquote(query.get("path", [""])[0]))
+            path = resolve_served(unquote(query.get("path", [""])[0]), served_source_paths())
+            if path is None:
+                self.send_error(404)
+                return
             if "clip_start" in query or "clip_end" in query:
                 try:
                     start = float(query.get("clip_start", ["0"])[0])
@@ -173,6 +214,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self.request_host_is_local() or not self.request_origin_is_local():
+            self.send_error(403)
+            return
         parsed = urlparse(self.path)
         data = self.read_json()
         if parsed.path == "/api/settings":

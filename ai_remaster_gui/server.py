@@ -43,7 +43,7 @@ from .manifests import (
     write_outpaint_chunk_rows,
 )
 from .models import COLORIZE_STAGE_KEYS, STAGES, Stage, output_stage
-from .paths import even_int, format_timecode, newest, rel, resolve, resolve_video_source, safe_stem
+from .paths import even_int, format_timecode, newest, rel, resolve, resolve_served, resolve_video_source, safe_stem
 from .naming import manifest_for_outpainted
 from .project_io import (
     last_browse_dir,
