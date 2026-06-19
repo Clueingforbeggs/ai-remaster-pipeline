@@ -362,7 +362,14 @@ function updateReferencesDynamicStatus() {
   const progressEl = document.querySelector('.shot-page > section:first-child .phase-progress');
   if (progressEl) progressEl.outerHTML = progressHtml(sp.percent, sp.label);
 
-  const rows = ((state.shot_views && state.shot_views.references) || []).map(row => row.index);
+  const dirtyRows = new Set(
+    [...document.querySelectorAll('[data-reference-time-slider][data-reference-time-dirty="true"]')]
+      .map(el => Number(el.dataset.shotIndex))
+      .filter(Number.isInteger)
+  );
+  const rows = ((state.shot_views && state.shot_views.references) || [])
+    .map(row => row.index)
+    .filter(index => !dirtyRows.has(index));
   refreshShotRows('references', rows);
 }
 
@@ -377,7 +384,9 @@ function referenceTimeControl(manifest, row, idx, slider, label, img) {
       step="0.041"
       value="${row.selected_time}"
       disabled
-      oninput="updateShotPreview('${esc(manifest)}',${idx},this.value,'${img}','${label}')"
+      data-reference-time-slider="true"
+      data-shot-index="${idx}"
+      oninput="this.dataset.referenceTimeDirty='true';updateShotPreview('${esc(manifest)}',${idx},this.value,'${img}','${label}')"
     >
     <div class="shot-time" id="${label}">${esc(row.selected_label)}</div>
   `;

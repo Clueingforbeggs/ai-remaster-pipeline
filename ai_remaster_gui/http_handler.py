@@ -331,7 +331,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             request_quit(self.server)
         elif parsed.path == "/api/shot-scrub":
-            self._send_result("Shot scrub", lambda: {**extract_reference_frame(str(data.get("manifest", "")), int(data.get("index", 0)), float(data.get("time", 0)))})
+            self._send_result("Shot scrub", lambda: {
+                **extract_reference_frame(str(data.get("manifest", "")), int(data.get("index", 0)), float(data.get("time", 0))),
+                "state": state.APP.state("references"),
+            })
         elif parsed.path == "/api/shot-prompt":
             self._send_result("Shot prompt save", lambda: update_manifest_row(resolve(str(data.get("manifest", ""))), int(data.get("index", 0)), {"prompt": str(data.get("prompt", ""))}) or {})
         elif parsed.path == "/api/shot-enabled":
@@ -391,10 +394,10 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/export-media":
             self._send_result("Media export", lambda: {**export_media_file(str(data.get("path", "")))})
         elif parsed.path == "/api/outpaint-chunk":
-            self._send_result("Outpaint chunk save", lambda: update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0"))) or {"state": state.APP.state("outpaint")})
+            self._send_result("Outpaint chunk save", lambda: update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0")), data.get("auto_start_guide", True)) or {"state": state.APP.state("outpaint")})
         elif parsed.path == "/api/outpaint-chunk-regenerate":
             self._send_action("Outpaint chunk regeneration", lambda: (
-                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0"))),
+                update_outpaint_chunk(int(data.get("index", 0)), str(data.get("seed", "")), str(data.get("prompt_suffix", "")), str(data.get("custom_seconds", "")), str(data.get("negative_suffix", "")), str(data.get("guide_strength", "")), str(data.get("guide_end_strength", "")), data.get("custom_length", None), str(data.get("offset_x", "0")), str(data.get("offset_y", "0")), data.get("auto_start_guide", True)),
                 state.APP.run_outpaint_chunk(int(data.get("index", 0))),
             )[1], view="outpaint")
         elif parsed.path == "/api/outpaint-anchor":

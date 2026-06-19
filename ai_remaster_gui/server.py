@@ -2034,6 +2034,7 @@ def outpaint_chunks_state(settings: dict) -> dict:
         row.setdefault("guide_end_image", "")
         row.setdefault("guide_end_strength", "1.0")
         row.setdefault("guide_frames", "")
+        row.setdefault("auto_start_guide", "true")
         rows.append(row)
     write_outpaint_chunk_rows(manifest, rows)
     view_rows = []
@@ -2152,7 +2153,7 @@ def redact_command_for_log(cmd: list[str]) -> str:
     return " ".join(redacted)
 
 
-def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seconds: str = "", negative_suffix: str = "", guide_strength: str = "", guide_end_strength: str = "", custom_length=None, offset_x: str = "0", offset_y: str = "0") -> None:
+def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seconds: str = "", negative_suffix: str = "", guide_strength: str = "", guide_end_strength: str = "", custom_length=None, offset_x: str = "0", offset_y: str = "0", auto_start_guide=None) -> None:
     state = outpaint_chunks_state(APP.settings)
     manifest_text = state.get("manifest", "")
     if not manifest_text:
@@ -2166,6 +2167,9 @@ def update_outpaint_chunk(index: int, seed: str, prompt_suffix: str, custom_seco
     row["negative_suffix"] = negative_suffix
     row["offset_x"] = str(int(float(offset_x or 0)))
     row["offset_y"] = str(int(float(offset_y or 0)))
+    if auto_start_guide is None:
+        auto_start_guide = row.get("auto_start_guide", "true")
+    row["auto_start_guide"] = "true" if _truthy_payload_value(auto_start_guide) else "false"
     use_custom_length = _truthy_payload_value(custom_length) if custom_length is not None else bool(custom_seconds)
     if use_custom_length and custom_seconds:
         row["custom_seconds"] = f"{max(0.1, float(custom_seconds)):.3f}"

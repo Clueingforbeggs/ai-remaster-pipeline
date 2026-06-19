@@ -745,6 +745,33 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertIn("_ox+12_oy-4", rows[0]["prepared_path"])
             self.assertIn("_ox+12_oy-4", rows[0]["raw_path"])
 
+    def test_outpaint_auto_start_guide_defaults_on_and_can_be_disabled(self) -> None:
+        self.assertTrue(outpaint_video.auto_start_guide_enabled({}))
+        self.assertTrue(outpaint_video.auto_start_guide_enabled({"auto_start_guide": "true"}))
+        self.assertFalse(outpaint_video.auto_start_guide_enabled({"auto_start_guide": "false"}))
+
+    def test_outpaint_manifest_sync_preserves_auto_start_guide_override(self) -> None:
+        with tempfile.TemporaryDirectory(dir=app.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            manifest = folder / "chunks.csv"
+            outpaint_video.write_chunk_manifest(
+                manifest,
+                [
+                    {
+                        "chunk_index": "0",
+                        "start_frame": "0",
+                        "end_frame": "10",
+                        "seed": "42",
+                        "auto_start_guide": "false",
+                    }
+                ],
+            )
+
+            rows = outpaint_video.sync_chunk_manifest(manifest, [(0, 0, 10), (1, 8, 18)], 24.0, folder, 42)
+
+            self.assertEqual(rows[0]["auto_start_guide"], "false")
+            self.assertEqual(rows[1]["auto_start_guide"], "true")
+
     def test_colormnet_correlation_extension_install_is_opt_in(self) -> None:
         downloader_path = app.ROOT / "vendor" / "comfyui_custom_nodes" / "reference-video-colorization" / "colormnet" / "downloader.py"
         spec = importlib.util.spec_from_file_location("colormnet_downloader_under_test", downloader_path)

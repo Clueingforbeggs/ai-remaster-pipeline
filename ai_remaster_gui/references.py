@@ -501,9 +501,14 @@ def extract_reference_frame(manifest_text: str, index: int, seconds: float) -> d
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
     new_color = color_reference_for_source(rel(new_source))
-    update_manifest_row(manifest, index, {"source_reference": rel(new_source), "color_reference": new_color})
+    selected_frame = int(round(max(0.0, seconds) * manifest_fps(manifest)))
+    update_manifest_row(manifest, index, {
+        "source_reference": rel(new_source),
+        "color_reference": new_color,
+        "selected_frame": str(selected_frame),
+    })
     state.APP.log.append(f"Updated shot {index + 1} reference frame to {format_timecode(seconds)}: {rel(new_source)}")
-    return {"source_reference": rel(new_source), "color_reference": new_color}
+    return {"source_reference": rel(new_source), "color_reference": new_color, "selected_frame": str(selected_frame)}
 
 def preview_reference_frame(manifest_text: str, index: int, seconds: float) -> str:
     manifest = resolve(manifest_text)
