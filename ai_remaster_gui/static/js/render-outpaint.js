@@ -66,7 +66,7 @@ function outpaintChunkSummary(row) {
       ${chunkOffsetControls(row)}
       <label>Seed</label>
       <input id="chunkSeed_${idx}" type="number" value="${esc(row.seed || '42')}">
-      <label><input id="chunkAutoStartGuide_${idx}" type="checkbox" ${autoStartGuide ? 'checked' : ''} ${autoStartGuideDisabled}> Use previous chunk as start guide</label>
+      <label><input id="chunkAutoStartGuide_${idx}" type="checkbox" ${autoStartGuide ? 'checked' : ''} ${autoStartGuideDisabled} onchange="syncAutoStartGuideVisibility(${idx})"> Use previous chunk as start guide</label>
       <div class="shot-tools">
         <button type="button" onclick="saveOutpaintChunk(${idx})">Save</button>
         <button type="button" data-outpaint-disable-running="true" onclick="regenerateOutpaintChunk(${idx})" ${state.running ? 'disabled' : ''}>Regenerate Chunk</button>
@@ -80,17 +80,29 @@ function outpaintChunkGuide(row) {
   const guides = row.guides || [];
   const lengthFrames = Math.max(1, Number(row.length_frames || 1));
   const fps = Math.max(1, Number(row.fps || 24));
+  const autoStartGuideAvailable = !!row.auto_start_guide_available;
+  const autoStartGuideActive = autoStartGuideAvailable && String(row.auto_start_guide || '').toLowerCase() !== 'false';
 
   // Warn about duplicate effective positions, mirroring resolve_guide_coords in
   // outpaint_video.py: negatives resolve from the chunk's latent count, and positions
   // 1 above a multiple of 8 shift down 1 at render (IC-LoRA coordinate clash).
   const resolvedIdxs = guides.map(g => resolveGuideCoord(Number(g.frame_idx), lengthFrames));
   const dupIdxs = new Set(resolvedIdxs.filter((v, i, a) => a.indexOf(v) !== i));
+  const guideLabelOffset = autoStartGuideActive ? 1 : 0;
 
-  const guideCards = guides.map((g, gi) => guideFrameCard(idx, gi, g, lengthFrames, fps, dupIdxs)).join('');
+  const guideCards = guides.map((g, gi) => guideFrameCard(
+    idx,
+    gi,
+    g,
+    lengthFrames,
+    fps,
+    dupIdxs,
+    guideLabelOffset,
+    autoStartGuideActive && guideUsesStartPosition(g, lengthFrames)
+  )).join('');
 
   const empty = guides.length === 0
-    ? `<p class="shot-empty guide-empty">No guide frames set. Add one below to steer LTX at specific points in the chunk.</p>`
+    ? `<p class="shot-empty guide-empty${autoStartGuideActive ? ' hidden' : ''}">No guide frames set. Add one below to steer LTX at specific points in the chunk.</p>`
     : '';
 
   const tooMany = guides.length > Math.floor(lengthFrames / 8) + 1
@@ -100,7 +112,10 @@ function outpaintChunkGuide(row) {
   return `
     <div class="chunk-guide-section">
       ${empty}${tooMany}
-      <div id="guideFrameList_${idx}">${guideCards}</div>
+      <div id="guideFrameList_${idx}">
+        ${autoStartGuideAvailable ? autoStartGuideCard(row, autoStartGuideActive) : ''}
+        ${guideCards}
+      </div>
       <div class="shot-tools guide-add-row">
         <button type="button" data-outpaint-disable-running="true"
           onclick="addGuideFrame(${idx})" ${state.running ? 'disabled' : ''}>+ Add Guide Frame</button>
@@ -121,6 +136,10 @@ function resolveGuideCoord(fi, lengthFrames) {
   return coord;
 }
 
+function guideUsesStartPosition(g, lengthFrames) {
+  return resolveGuideCoord(Number(g.frame_idx), lengthFrames) === 0;
+}
+
 function guideFrameLabel(fi, maxFrame) {
   if (fi === 0) return '0 — chunk start (i2v)';
   if (fi >= maxFrame) return `${fi} — last frame (FLF2V)`;
@@ -129,7 +148,35 @@ function guideFrameLabel(fi, maxFrame) {
   return `${fi}`;
 }
 
-function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
+function autoStartGuideCard(row, visible) {
+  const idx = Number(row.index);
+  const sourceIndex = Number(row.auto_start_guide_source_index);
+  const maxFrame = Math.max(0, Number(row.length_frames || 1) - 1);
+  const title = `Last outpainted frame from Chunk ${sourceIndex + 1}`;
+  return `
+    <div id="autoStartGuide_${idx}" class="chunk-guide guide-frame-card auto-start-guide-card${visible ? '' : ' hidden'}">
+      <div>
+        <label>Guide 1 - Use previous chunk as start guide</label>
+        <figure class="still-figure has-anchor">
+          <img id="autoStartGuideThumb_${idx}" class="pending-thumb" alt=""
+            data-outpaint-thumb="true"
+            data-chunk-index="${sourceIndex}"
+            data-thumb-kind="raw"
+            data-thumb-position="end"
+            title="${esc(title)}">
+          <span class="anchor-badge">Auto</span>
+          <figcaption>Previous chunk end frame</figcaption>
+        </figure>
+      </div>
+      <div>
+        <label>Frame: ${esc(guideFrameLabel(0, maxFrame))}</label>
+        <p class="shot-time">Uses the last rendered frame from Chunk ${sourceIndex + 1}.</p>
+      </div>
+    </div>
+  `;
+}
+
+function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs, guideLabelOffset = 0, overridden = false) {
   const maxFrame = Math.max(0, lengthFrames - 1);
   // Normalise stored frame_idx: negative values → equivalent positive index
   const rawFi = Number(g.frame_idx);
@@ -138,6 +185,8 @@ function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
   const hasImage = !!g.image_exists;
   const isDup = dupIdxs.has(resolveGuideCoord(rawFi, lengthFrames));
   const outOfRange = rawFi >= lengthFrames || rawFi < -lengthFrames;
+  const baseGuideNumber = guideIdx + 1;
+  const shownGuideNumber = baseGuideNumber + guideLabelOffset;
 
   const thumbSrc = hasImage
     ? media(g.image) + (g.image_mtime ? '&t=' + g.image_mtime : '')
@@ -148,9 +197,9 @@ function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
     : `<img id="gfThumb_${chunkIdx}_${guideIdx}" class="pending-thumb" alt="" title="Source preview not ready">`;
 
   return `
-    <div class="chunk-guide guide-frame-card${isDup || outOfRange ? ' guide-frame-dup' : ''}">
+    <div class="chunk-guide guide-frame-card${isDup || outOfRange ? ' guide-frame-dup' : ''}${overridden ? ' guide-frame-overridden' : ''}" data-start-position-guide="${guideUsesStartPosition(g, lengthFrames) ? 'true' : 'false'}">
       <div>
-        <label>Guide ${guideIdx + 1}${isDup ? ' ⚠ duplicate position' : ''}${outOfRange ? ' ⚠ beyond chunk end — skipped at render' : ''}</label>
+        <label><span class="guide-label-text" data-base-guide-number="${baseGuideNumber}">Guide ${shownGuideNumber}</span>${overridden ? '<span class="guide-override-note"> - overridden by Guide 1</span>' : '<span class="guide-override-note hidden"> - overridden by Guide 1</span>'}${isDup ? ' ⚠ duplicate position' : ''}${outOfRange ? ' ⚠ beyond chunk end — skipped at render' : ''}</label>
         <figure class="still-figure ${hasImage ? 'has-anchor' : ''}">
           ${thumbHtml}
           ${hasImage ? `<span class="anchor-badge">Guide</span>` : ''}
@@ -189,6 +238,39 @@ function guideFrameCard(chunkIdx, guideIdx, g, lengthFrames, fps, dupIdxs) {
   `;
 }
 
+function syncAutoStartGuideVisibility(index) {
+  const checkbox = document.getElementById(`chunkAutoStartGuide_${index}`);
+  const autoCard = document.getElementById(`autoStartGuide_${index}`);
+  const visible = !!(checkbox && checkbox.checked && autoCard);
+  if (autoCard) autoCard.classList.toggle('hidden', !visible);
+
+  document.querySelectorAll(`#guideFrameList_${index} .guide-label-text`).forEach(label => {
+    const base = Number(label.dataset.baseGuideNumber || 0);
+    if (base > 0) label.textContent = `Guide ${base + (visible ? 1 : 0)}`;
+  });
+  document.querySelectorAll(`#guideFrameList_${index} .guide-frame-card[data-start-position-guide="true"]`).forEach(card => {
+    card.classList.toggle('guide-frame-overridden', visible);
+    const note = card.querySelector('.guide-override-note');
+    if (note) note.classList.toggle('hidden', !visible);
+  });
+
+  const empty = document.querySelector(`#guideFrameList_${index}`)?.parentElement?.querySelector('.guide-empty');
+  if (empty) empty.classList.toggle('hidden', visible);
+}
+
+function updateGuideFrameStartOverride(chunkIdx, guideIdx, frameIdx, maxFrame) {
+  const img = document.getElementById(`gfThumb_${chunkIdx}_${guideIdx}`);
+  const card = img ? img.closest('.guide-frame-card') : null;
+  if (!card) return;
+  const usesStartPosition = resolveGuideCoord(Number(frameIdx), Number(maxFrame) + 1) === 0;
+  const autoCard = document.getElementById(`autoStartGuide_${chunkIdx}`);
+  const autoVisible = !!(autoCard && !autoCard.classList.contains('hidden'));
+  card.dataset.startPositionGuide = usesStartPosition ? 'true' : 'false';
+  card.classList.toggle('guide-frame-overridden', autoVisible && usesStartPosition);
+  const note = card.querySelector('.guide-override-note');
+  if (note) note.classList.toggle('hidden', !(autoVisible && usesStartPosition));
+}
+
 const _gfPreviewTimers = {};
 
 function onGuideFrameSlide(chunkIdx, guideIdx, value, maxFrame) {
@@ -197,6 +279,7 @@ function onGuideFrameSlide(chunkIdx, guideIdx, value, maxFrame) {
   const input = document.getElementById(`gfInput_${chunkIdx}_${guideIdx}`);
   if (label) label.textContent = guideFrameLabel(fi, maxFrame);
   if (input) input.value = fi;
+  updateGuideFrameStartOverride(chunkIdx, guideIdx, fi, maxFrame);
   // Update generate modal frame_idx live
   const modal = document.getElementById('guideFrameGenerateModal');
   if (modal && Number(modal.dataset.chunkIndex) === chunkIdx && Number(modal.dataset.guideIndex) === guideIdx) {
@@ -333,44 +416,16 @@ function updateOutpaintRuntimeControls() {
 
 function outpaintChunkPrompt(row) {
   const idx = row.index;
-  const positive = exactOutpaintPrompt(row.prompt_suffix || '', false, row.effective_prompt || '');
-  const negative = exactOutpaintPrompt(row.negative_suffix || '', true, row.effective_negative_prompt || '');
 
   return `
     <div>
       <label>Prompt suffix</label>
-      <textarea id="chunkPrompt_${idx}" placeholder="Optional direction for this chunk" oninput="updateExactOutpaintPrompt(${idx})">${esc(row.prompt_suffix || '')}</textarea>
+      <textarea id="chunkPrompt_${idx}" placeholder="Optional direction for this chunk">${esc(row.prompt_suffix || '')}</textarea>
       <label>Negative suffix</label>
-      <textarea id="chunkNegative_${idx}" placeholder="Optional things to avoid in this chunk" oninput="updateExactOutpaintPrompt(${idx})">${esc(row.negative_suffix || '')}</textarea>
-      <div class="exact-prompt-panel" data-exact-prompt-chunk="${idx}">
-        <label>Positive sent to Comfy</label>
-        <textarea id="chunkExactPrompt_${idx}" readonly>${esc(positive)}</textarea>
-        <label>Negative sent to Comfy</label>
-        <textarea id="chunkExactNegative_${idx}" readonly>${esc(negative)}</textarea>
-      </div>
+      <textarea id="chunkNegative_${idx}" placeholder="Optional things to avoid in this chunk">${esc(row.negative_suffix || '')}</textarea>
       <p class="shot-time">Use these to nudge LTX away from odd extra objects, warped geometry, hands, or missing details.</p>
     </div>
   `;
-}
-
-function exactOutpaintPrompt(suffix, negative = false, fallback = '') {
-  const s = settings('outpaint');
-  const base = (negative ? (s.negative_prompt || '') : (s.prompt || 'outpaint')).trim();
-  const extra = (suffix || '').trim();
-  if (!base && !extra) return fallback || '';
-  if (!base) return extra;
-  if (!extra) return base;
-  const separator = /[.!?:]$/.test(base) ? ' ' : '. ';
-  return `${base}${separator}${extra}`;
-}
-
-function updateExactOutpaintPrompt(index) {
-  const promptEl = document.getElementById(`chunkPrompt_${index}`);
-  const negativeEl = document.getElementById(`chunkNegative_${index}`);
-  const exactEl = document.getElementById(`chunkExactPrompt_${index}`);
-  const exactNegativeEl = document.getElementById(`chunkExactNegative_${index}`);
-  if (exactEl) exactEl.value = exactOutpaintPrompt(promptEl ? promptEl.value : '', false);
-  if (exactNegativeEl) exactNegativeEl.value = exactOutpaintPrompt(negativeEl ? negativeEl.value : '', true);
 }
 
 function toggleChunkLength(index) {

@@ -178,17 +178,18 @@ const CHECKBOX_DESCRIPTIONS = {
     'Before each chunk renders, a guide frame is generated at every detected shot change with ' +
     'Qwen Image Edit ("Replace the black bars.") and fed to LTX as the anchor for that shot, so ' +
     'it extends from a filled frame instead of copying the bars. Slower, but reliable on stubborn clips.',
+  outpaint_all_black_regions:
+    "Don't expand the canvas, just paint over all pure black areas. Use this when the region to be extended changes, e.g. you have mixed-size footage in your clip.",
 };
 
 function checkboxFieldHtml(key, label, value, help = '') {
   const description = CHECKBOX_DESCRIPTIONS[key];
   if (description) {
     return `
-      <label class="checkbox-feature">
+      <label class="checkbox-feature" title="${esc(description)}">
         <input data-field="${key}" data-kind="checkbox" type="checkbox" ${value === 'true' ? 'checked' : ''}>
         <span class="checkbox-feature-text">
           <strong>${esc(label)}</strong>
-          <small>${esc(description)}</small>
         </span>
       </label>
     `;

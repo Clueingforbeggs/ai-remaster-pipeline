@@ -1411,17 +1411,21 @@ def main() -> int:
                 args.guide_strength = explicit_strength if explicit_strength is not None else base_guide_strength
 
                 auto_guide: bool = False
-                guide_image: Path | None = explicit_guide
+                guide_image: Path | None = None
                 use_auto_start_guide = auto_start_guide_enabled(chunk_row)
-                if guide_image is None and previous_raw is not None and previous_raw.exists() and use_auto_start_guide:
+                if previous_raw is not None and previous_raw.exists() and use_auto_start_guide:
                     try:
                         guide_image = extract_last_frame_as_guide(previous_raw, chunk_dir)
                         auto_guide = True
                         print(f"Chunk {chunk_index + 1}: auto-guide from last frame of chunk {chunk_index}", flush=True)
+                        if explicit_guide is not None:
+                            print(f"Chunk {chunk_index + 1}: frame-0 guide overridden by previous-chunk start guide", flush=True)
                     except Exception as exc:
                         print(f"Warning: could not extract auto-guide from previous chunk: {exc}", flush=True)
-                elif guide_image is None and previous_raw is not None and previous_raw.exists() and not use_auto_start_guide:
+                elif previous_raw is not None and previous_raw.exists() and not use_auto_start_guide:
                     print(f"Chunk {chunk_index + 1}: previous-chunk start guide disabled", flush=True)
+                if guide_image is None:
+                    guide_image = explicit_guide
 
                 chunk_sig = raw_signature(args, workflow_path, chunk_prepared, chunk_seed, chunk_prompt_suffix, chunk_negative_suffix, guide_image, extra_guides, auto_guide)
                 if args.only_chunk is not None and chunk_index != args.only_chunk:

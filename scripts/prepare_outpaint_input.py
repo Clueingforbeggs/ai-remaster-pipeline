@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import cv2
@@ -154,7 +156,31 @@ def default_output(source: Path, target_width: int, target_height: int, delivery
     return resolve_path(Path('intermediate') / 'outpaint_prepared' / f'{source.stem}_{target_width}x{target_height}{delivery_tag}_lifted.mp4')
 
 
-def replace_with_retry(partial: Path, output: Path, attempts: int = 20, delay: float = 0.5) -> None:
+def partial_output_path(output: Path) -> Path:
+    return output.with_name(f'{output.stem}.partial.{os.getpid()}.{uuid.uuid4().hex}{output.suffix}')
+
+
+def cleanup_stale_partials(output: Path, max_age_seconds: float = 24 * 60 * 60) -> None:
+    now = time.time()
+    patterns = [
+        f'{output.stem}.partial.*{output.suffix}',
+        f'{output.name}.partial{output.suffix}',
+    ]
+    for pattern in patterns:
+        try:
+            candidates = list(output.parent.glob(pattern))
+        except OSError:
+            continue
+        for candidate in candidates:
+            try:
+                if candidate == output or now - candidate.stat().st_mtime < max_age_seconds:
+                    continue
+                candidate.unlink()
+            except OSError:
+                pass
+
+
+def replace_with_retry(partial: Path, output: Path, attempts: int = 60, delay: float = 0.5) -> None:
     last_exc: PermissionError | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -163,11 +189,11 @@ def replace_with_retry(partial: Path, output: Path, attempts: int = 20, delay: f
         except PermissionError as exc:
             last_exc = exc
             if attempt == 1:
-                print(f'Waiting for file lock to clear before replacing prepared input: {output}', flush=True)
+                print(f'Waiting for file lock to clear before replacing prepared input: {partial} -> {output}', flush=True)
             time.sleep(delay)
     raise PermissionError(
-        f'Could not replace prepared input because it is open in another process: {output}. '
-        'Close any ARP preview, media player, Resolve bin/timeline item, or Explorer preview using this file and try again.'
+        f'Could not replace prepared input because the temporary or final file is open in another process: {partial} -> {output}. '
+        'Close any ARP preview, media player, Resolve bin/timeline item, Explorer preview, or antivirus scan using this file and try again.'
     ) from last_exc
 
 
@@ -210,7 +236,7 @@ def main():
         print(f'Reuse prepared outpaint input: {output}', flush=True)
         return 0
     ffmpeg = find_ffmpeg(args.ffmpeg)
-    partial = output.with_suffix(output.suffix + '.partial' + output.suffix)
+    partial = partial_output_path(output)
     fps = float(info["fps"] or 24.0)
     command = [
         ffmpeg,
@@ -239,6 +265,7 @@ def main():
     if args.dry_run:
         return 0
     output.parent.mkdir(parents=True, exist_ok=True)
+    cleanup_stale_partials(output)
     subprocess.run(command, check=True)
     replace_with_retry(partial, output)
     write_signature(output, sig)

@@ -304,6 +304,18 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertNotIn("lutrgb=", filter_text)
         self.assertIn("color=c=black:s=1280x704", filter_text)
 
+    def test_prepare_outpaint_partial_output_paths_are_per_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_text:
+            output = Path(tmp_text) / "Example_prepared_12345678.mp4"
+
+            first = prepare_outpaint_input.partial_output_path(output)
+            second = prepare_outpaint_input.partial_output_path(output)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent, output.parent)
+        self.assertTrue(first.name.startswith("Example_prepared_12345678.partial."))
+        self.assertTrue(first.name.endswith(".mp4"))
+
     def test_outpaint_all_black_regions_changes_output_paths_and_command(self) -> None:
         app.APP.settings.setdefault("outpaint", {}).update(
             {

@@ -2043,6 +2043,10 @@ def outpaint_chunks_state(settings: dict) -> dict:
     for row in rows:
         raw = resolve(row["raw_path"])
         prepared = resolve(row["prepared_path"])
+        chunk_index = int(row["chunk_index"])
+        previous_raw = None
+        if chunk_index > 0 and (chunk_index - 1) < len(rows):
+            previous_raw = resolve(rows[chunk_index - 1]["raw_path"])
         start_seconds = float(row["start_seconds"])
         end_seconds = float(row["end_seconds"])
         middle_seconds = (start_seconds + end_seconds) / 2
@@ -2050,7 +2054,7 @@ def outpaint_chunks_state(settings: dict) -> dict:
         aspect = values.get("target_aspect", "16:9")
         guides = _build_guide_frames_view(row, source_text, aspect, start_seconds, end_seconds, fps, length_frames)
         view_rows.append(row | {
-            "index": int(row["chunk_index"]),
+            "index": chunk_index,
             "start": float(row["start_seconds"]),
             "end": float(row["end_seconds"]),
             "fps": fps,
@@ -2063,6 +2067,8 @@ def outpaint_chunks_state(settings: dict) -> dict:
             "raw_mtime": int(raw.stat().st_mtime_ns) if raw.exists() else 0,
             "prepared_exists": prepared.exists(),
             "guides": guides,
+            "auto_start_guide_available": bool(previous_raw and previous_raw.exists()),
+            "auto_start_guide_source_index": chunk_index - 1 if previous_raw and previous_raw.exists() else None,
             "source_start_preview": "",
             "source_middle_preview": "",
             "source_end_preview": "",
@@ -2098,7 +2104,26 @@ def outpaint_chunk_preview(settings: dict, chunk_index: int, kind: str, position
         raw = resolve(str(row.get("raw_path", "")))
         if not raw.exists():
             return ""
-        return chunk_frame_preview(raw, offset, f"raw_{chunk_index}_{position}")
+        raw_fps = fps
+        raw_duration = duration
+        try:
+            raw_metrics = video_metrics(raw)
+            raw_fps = max(1.0, float(raw_metrics.get("fps") or fps))
+            raw_duration = max(0.0, float(raw_metrics.get("duration") or duration))
+        except Exception:
+            raw_fps = fps
+            raw_duration = duration
+        if position == "start":
+            raw_offset = 0.0
+        elif position == "end":
+            raw_offset = max(0.0, raw_duration - (1.0 / raw_fps))
+        else:
+            raw_offset = raw_duration / 2
+        try:
+            raw_identity = f"{raw.stat().st_mtime_ns}_{raw.stat().st_size}"
+        except OSError:
+            raw_identity = "current"
+        return chunk_frame_preview(raw, raw_offset, f"raw_{chunk_index}_{position}_{raw_identity}")
 
     source_text = pipeline_source_text(settings)
     if not source_text:
