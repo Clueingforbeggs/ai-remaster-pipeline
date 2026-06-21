@@ -1331,7 +1331,7 @@ async function browseGlobalSource() {
 }
 
 async function clearOverview() {
-  if (!confirm('Clear the selected source material from the UI? Generated files are left on disk.')) return;
+  if (!confirm('Clear the selected source and reset project UI settings to defaults? Generated files are left on disk.')) return;
 
   selected = {};
   const result = await postJson('/api/overview-clear', {});

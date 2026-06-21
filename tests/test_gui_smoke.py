@@ -1812,6 +1812,52 @@ class GuiSmokeTests(unittest.TestCase):
 
         self.assertEqual(settings["outpaint"]["seed_qwen_guides"], "false")
 
+    def test_clear_overview_resets_project_ui_settings_to_defaults(self) -> None:
+        app.APP.settings["global"].update({
+            "source": "input/old.mp4",
+            "expand_outpaint": "false",
+            "colorize": "false",
+            "upscale": "true",
+            "add_soundtrack": "true",
+            "section_start": "12",
+            "section_end": "34",
+            "last_browse_dir": "D:/media",
+        })
+        app.APP.settings["outpaint"].update({
+            "outpaint_all_black_regions": "true",
+            "prompt": "custom outpaint prompt",
+            "crop_left": "88",
+        })
+        app.APP.settings["references"].update({
+            "method": "openai",
+            "manifest": "manifests/references/old.csv",
+            "prompt": "custom reference prompt",
+            "prompt_suffix": "custom suffix",
+            "openai_api_key": "sk-test",
+        })
+        app.APP.settings["recomp"].update({"feather_pixels": "12", "colorized_video": "old.mp4"})
+
+        app.APP.clear_overview()
+
+        self.assertEqual(app.APP.settings["global"]["source"], "")
+        self.assertEqual(app.APP.settings["global"]["expand_outpaint"], "true")
+        self.assertEqual(app.APP.settings["global"]["colorize"], "true")
+        self.assertEqual(app.APP.settings["global"]["upscale"], "false")
+        self.assertEqual(app.APP.settings["global"]["add_soundtrack"], "false")
+        self.assertEqual(app.APP.settings["global"]["section_start"], "0")
+        self.assertEqual(app.APP.settings["global"]["section_end"], "")
+        self.assertEqual(app.APP.settings["global"]["last_browse_dir"], "D:/media")
+        self.assertEqual(app.APP.settings["outpaint"]["outpaint_all_black_regions"], "false")
+        self.assertEqual(app.APP.settings["outpaint"]["prompt"], config.OUTPAINT_PROMPT)
+        self.assertEqual(app.APP.settings["outpaint"]["crop_left"], "0")
+        self.assertEqual(app.APP.settings["references"]["method"], "qwen")
+        self.assertEqual(app.APP.settings["references"]["manifest"], "")
+        self.assertEqual(app.APP.settings["references"]["prompt"], config.REFERENCE_PROMPT)
+        self.assertEqual(app.APP.settings["references"]["prompt_suffix"], config.REFERENCE_PROMPT_SUFFIX)
+        self.assertEqual(app.APP.settings["references"]["openai_api_key"], "")
+        self.assertEqual(app.APP.settings["recomp"]["feather_pixels"], "80")
+        self.assertEqual(app.APP.settings["recomp"]["colorized_video"], "")
+
     def test_detected_monochrome_source_sets_colorize_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_text:
             source = Path(tmp_text) / "new-source.mp4"

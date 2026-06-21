@@ -114,21 +114,16 @@ def qwen_masked_workflow_for(values: dict[str, str], config: dict[str, str]) -> 
         return configured
     return default_qwen_masked_workflow(config)
 
-def load_settings() -> dict[str, dict[str, str]]:
+def base_settings() -> dict[str, dict[str, str]]:
     defaults = {stage.key: {key: default for key, _label, _kind, default in stage.fields} for stage in STAGES}
     defaults["global"] = {"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "add_soundtrack": "false", "section_start": "0", "section_end": "", "last_browse_dir": ""}
+    return defaults
+
+
+def normalize_settings(defaults: dict[str, dict[str, str]], include_newest_source: bool = True) -> dict[str, dict[str, str]]:
     app_module = sys.modules.get("ai_remaster_gui.app")
-    settings_file = getattr(app_module, "SETTINGS_FILE", SETTINGS_FILE)
     newest_fn = getattr(app_module, "newest", newest) if app_module else newest
-    if settings_file.exists():
-        try:
-            stored = json.loads(settings_file.read_text(encoding="utf-8"))
-            for key, values in stored.items():
-                if key in defaults and isinstance(values, dict):
-                    defaults[key].update({k: str(v) for k, v in values.items()})
-        except json.JSONDecodeError:
-            pass
-    source = newest_fn(ROOT / "input", VIDEO_EXTS)
+    source = newest_fn(ROOT / "input", VIDEO_EXTS) if include_newest_source else None
     if source and not defaults["global"].get("source"):
         defaults["global"]["source"] = rel(source)
     if not defaults["global"].get("source"):
@@ -187,6 +182,25 @@ def load_settings() -> dict[str, dict[str, str]]:
     if defaults["references"].get("prompt_suffix", "") in old_reference_suffixes or "props" in defaults["references"].get("prompt_suffix", "").lower():
         defaults["references"]["prompt_suffix"] = REFERENCE_PROMPT_SUFFIX
     return defaults
+
+
+def default_settings(include_newest_source: bool = False) -> dict[str, dict[str, str]]:
+    return normalize_settings(base_settings(), include_newest_source=include_newest_source)
+
+
+def load_settings() -> dict[str, dict[str, str]]:
+    defaults = base_settings()
+    app_module = sys.modules.get("ai_remaster_gui.app")
+    settings_file = getattr(app_module, "SETTINGS_FILE", SETTINGS_FILE)
+    if settings_file.exists():
+        try:
+            stored = json.loads(settings_file.read_text(encoding="utf-8"))
+            for key, values in stored.items():
+                if key in defaults and isinstance(values, dict):
+                    defaults[key].update({k: str(v) for k, v in values.items()})
+        except json.JSONDecodeError:
+            pass
+    return normalize_settings(defaults, include_newest_source=True)
 
 
 APP_VERSION = app_version()

@@ -145,7 +145,7 @@ from .outpaint_guides import (
     bind_context as bind_outpaint_guides_context,
 )
 from .cache import cache_state, delete_cache_category, delete_cache_file, human_size
-from .runtime_settings import APP_VERSION, default_qwen_workflow, load_settings, qwen_masked_workflow_for, qwen_workflow_for
+from .runtime_settings import APP_VERSION, default_qwen_workflow, default_settings, load_settings, qwen_masked_workflow_for, qwen_workflow_for
 from .system_status import flashvsr_hardware_warning, system_status
 from .media import (
     aspect_preview,
@@ -869,9 +869,11 @@ class PipelineApp:
             self.save()
 
     def clear_overview(self) -> None:
-        self.settings.setdefault("global", {}).update({"source": "", "expand_outpaint": "true", "colorize": "true", "upscale": "false", "add_soundtrack": "false", "section_start": "0", "section_end": ""})
-        self.clear_derived_stage_inputs()
-        self.log.append("Cleared source material from the Overview.")
+        last_browse_dir = self.settings.get("global", {}).get("last_browse_dir", "")
+        self.settings = default_settings(include_newest_source=False)
+        if last_browse_dir:
+            self.settings.setdefault("global", {})["last_browse_dir"] = last_browse_dir
+        self.log.append("Cleared project settings from the Overview.")
         self.save()
 
     def save_project(self, save_as: bool = False) -> dict[str, str]:
