@@ -202,7 +202,9 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/shot-preview":
             query = parse_qs(parsed.query)
             try:
-                path = preview_reference_frame(query.get("manifest", [""])[0], int(query.get("index", ["0"])[0]), float(query.get("time", ["0"])[0]))
+                frame_text = query.get("frame", [""])[0]
+                frame = int(frame_text) if str(frame_text).strip() != "" else None
+                path = preview_reference_frame(query.get("manifest", [""])[0], int(query.get("index", ["0"])[0]), float(query.get("time", ["0"])[0]), frame=frame)
                 self.send_json({"ok": True, "path": path})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)})
@@ -332,7 +334,12 @@ class Handler(BaseHTTPRequestHandler):
             request_quit(self.server)
         elif parsed.path == "/api/shot-scrub":
             self._send_result("Shot scrub", lambda: {
-                **extract_reference_frame(str(data.get("manifest", "")), int(data.get("index", 0)), float(data.get("time", 0))),
+                **extract_reference_frame(
+                    str(data.get("manifest", "")),
+                    int(data.get("index", 0)),
+                    float(data.get("time", 0)),
+                    int(data.get("frame")) if data.get("frame") is not None and str(data.get("frame")).strip() != "" else None,
+                ),
                 "state": state.APP.state("references"),
             })
         elif parsed.path == "/api/shot-prompt":

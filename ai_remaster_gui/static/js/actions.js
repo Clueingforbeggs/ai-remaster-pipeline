@@ -62,9 +62,11 @@ async function redrawWithState(nextState, snap, forceSignature = false) {
   restoreScrollState(snap);
 }
 
-async function scrubShot(manifest, index, time) {
+async function scrubShot(manifest, index, time, frame = null) {
   const snap = captureScrollState();
-  const result = await postJson('/api/shot-scrub', { manifest, index, time });
+  const payload = { manifest, index, time };
+  if (frame !== null && frame !== undefined && Number.isFinite(Number(frame))) payload.frame = Math.max(0, Math.round(Number(frame)));
+  const result = await postJson('/api/shot-scrub', payload);
   if (!result.ok) return alert(result.error || 'Could not update shot frame');
 
   await refreshReferenceRowFromState(result.state, index);
@@ -986,14 +988,15 @@ function nudgeShotBoundary(manifest, index, edge, frames) {
 
 const previewTimers = {};
 
-function updateShotPreview(manifest, index, time, imgId, labelId) {
+function updateShotPreview(manifest, index, time, imgId, labelId, frame = null) {
   document.getElementById(labelId).textContent = formatSeconds(time);
   clearTimeout(previewTimers[imgId]);
 
   previewTimers[imgId] = setTimeout(async () => {
     const query = '?manifest=' + encodeURIComponent(manifest)
       + '&index=' + index
-      + '&time=' + encodeURIComponent(time);
+      + '&time=' + encodeURIComponent(time)
+      + (frame !== null && frame !== undefined && Number.isFinite(Number(frame)) ? '&frame=' + encodeURIComponent(Math.max(0, Math.round(Number(frame)))) : '');
     const result = await api('/api/shot-preview' + query);
     const img = document.getElementById(imgId);
     if (result.ok && result.path && img) img.src = media(result.path);
@@ -1014,7 +1017,8 @@ function updateShotBoundaryPreview(manifest, index, frame, imgId, labelId, datas
     const previewTime = previewFrame / fps;
     const query = '?manifest=' + encodeURIComponent(manifest)
       + '&index=' + index
-      + '&time=' + encodeURIComponent(previewTime);
+      + '&time=' + encodeURIComponent(previewTime)
+      + '&frame=' + encodeURIComponent(previewFrame);
     const result = await api('/api/shot-preview' + query);
     const img = document.getElementById(imgId);
     if (result.ok && result.path && img) img.src = media(result.path);

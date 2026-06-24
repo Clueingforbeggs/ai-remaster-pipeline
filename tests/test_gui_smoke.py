@@ -1361,6 +1361,10 @@ class GuiSmokeTests(unittest.TestCase):
             prompted["prompt"] = "warmer faces"
             deep_prompted = colorize_video.segment_signature(args_for("deepexemplar"), source, prompted, color_reference, 0, 10, 0, 10, 640, 360, 24.0)
             color_prompted = colorize_video.segment_signature(args_for("colormnet"), source, prompted, color_reference, 0, 10, 0, 10, 640, 360, 24.0)
+            with_previous = dict(row)
+            with_previous["color_reference_previous"] = ""
+            deep_with_previous = colorize_video.segment_signature(args_for("deepexemplar"), source, with_previous, color_reference, 0, 10, 0, 10, 640, 360, 24.0)
+            color_with_previous = colorize_video.segment_signature(args_for("colormnet"), source, with_previous, color_reference, 0, 10, 0, 10, 640, 360, 24.0)
             color_reference.write_bytes(b"new color reference")
             deep_changed_ref = colorize_video.segment_signature(args_for("deepexemplar"), source, row, color_reference, 0, 10, 0, 10, 640, 360, 24.0)
             color_changed_ref = colorize_video.segment_signature(args_for("colormnet"), source, row, color_reference, 0, 10, 0, 10, 640, 360, 24.0)
@@ -1368,6 +1372,8 @@ class GuiSmokeTests(unittest.TestCase):
         self.assertEqual(deep["shot_input"], color["shot_input"])
         self.assertNotEqual(deep["shot_input"], deep_prompted["shot_input"])
         self.assertNotEqual(color["shot_input"], color_prompted["shot_input"])
+        self.assertEqual(deep["shot_input"], deep_with_previous["shot_input"])
+        self.assertEqual(color["shot_input"], color_with_previous["shot_input"])
         self.assertNotEqual(deep["shot_input"], deep_changed_ref["shot_input"])
         self.assertNotEqual(color["shot_input"], color_changed_ref["shot_input"])
 
@@ -1987,12 +1993,20 @@ class GuiSmokeTests(unittest.TestCase):
             guide = folder / "guide.png"
             output.write_bytes(b"rendered")
             guide.write_bytes(b"guide bytes")
-            signature = {"version": 1, "guide_fingerprint": common.file_fingerprint(guide)}
+            signature = {
+                "version": 1,
+                "guide_fingerprint": common.file_fingerprint(guide),
+                "row": {"color_reference": "ref.png", "color_reference_previous": None},
+            }
             common.write_signature(output, signature)
 
             touched = copy.deepcopy(signature)
             touched["guide_fingerprint"]["mtime_ns"] += 1
             self.assertTrue(common.signature_matches(output, touched))
+
+            bookkeeping = copy.deepcopy(signature)
+            bookkeeping["row"] = {"color_reference": "ref.png"}
+            self.assertTrue(common.signature_matches(output, bookkeeping))
 
             changed = copy.deepcopy(signature)
             changed["guide_fingerprint"]["sha256"] = "0" * 64

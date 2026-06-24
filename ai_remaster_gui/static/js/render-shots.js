@@ -374,6 +374,7 @@ function updateReferencesDynamicStatus() {
 }
 
 function referenceTimeControl(manifest, row, idx, slider, label, img) {
+  const fps = Math.max(1, Number(row.fps || 24));
   return `
     <label>Reference time</label>
     <input
@@ -386,7 +387,8 @@ function referenceTimeControl(manifest, row, idx, slider, label, img) {
       disabled
       data-reference-time-slider="true"
       data-shot-index="${idx}"
-      oninput="this.dataset.referenceTimeDirty='true';updateShotPreview('${esc(manifest)}',${idx},this.value,'${img}','${label}')"
+      data-fps="${fps}"
+      oninput="this.dataset.referenceTimeDirty='true';updateShotPreview('${esc(manifest)}',${idx},this.value,'${img}','${label}',Math.round(Number(this.value) * Number(this.dataset.fps || 24)))"
     >
     <div class="shot-time" id="${label}">${esc(row.selected_label)}</div>
   `;
@@ -463,7 +465,7 @@ function wireReferenceTimeControls() {
     }
 
     tools.innerHTML = `
-      <button type="button" onclick="scrubShot('${esc(manifest)}',${row.index},document.getElementById('shotSlider_references_${row.index}').value)">
+      <button type="button" onclick="scrubShot('${esc(manifest)}',${row.index},document.getElementById('shotSlider_references_${row.index}').value,Math.round(Number(document.getElementById('shotSlider_references_${row.index}').value) * ${Math.max(1, Number(row.fps || 24))}))">
         Use Frame
       </button>
     `;

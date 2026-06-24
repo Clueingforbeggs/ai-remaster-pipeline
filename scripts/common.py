@@ -56,7 +56,11 @@ def signature_path(path: Path) -> Path:
 
 def _without_mtime(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _without_mtime(item) for key, item in value.items() if key != "mtime_ns"}
+        return {
+            key: _without_mtime(item)
+            for key, item in value.items()
+            if key not in {"mtime_ns", "color_reference_previous"}
+        }
     if isinstance(value, list):
         return [_without_mtime(item) for item in value]
     return value

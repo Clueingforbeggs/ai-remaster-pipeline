@@ -122,8 +122,9 @@ def row_path_signature(row: dict[str, str], key: str) -> dict[str, Any]:
 def shot_input_signature(row: dict[str, str]) -> dict[str, Any]:
     """Everything about a manifest row that can make a cached shot segment stale."""
     ref = row_reference(row)
+    unsigned_row_keys = {"color_reference_previous"}
     return {
-        "row": {key: row.get(key, "") for key in sorted(row)},
+        "row": {key: row.get(key, "") for key in sorted(row) if key not in unsigned_row_keys},
         "source_reference": row_path_signature(row, "source_reference"),
         "color_reference": row_path_signature(row, "color_reference"),
         "reference": root_relative(ref),

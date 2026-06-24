@@ -401,6 +401,29 @@ def extract_video_frame_at(source: Path, target_dir: Path, suffix: str, seconds:
         result = subprocess.run(command, check=False, capture_output=True, text=True)
     return rel(target) if result.returncode == 0 and target.exists() else ""
 
+def extract_video_frame_at_frame(source: Path, target_dir: Path, suffix: str, frame_index: int, quality: int = 4) -> str:
+    ffmpeg = local_tool("ffmpeg")
+    if not ffmpeg:
+        return ""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    frame = max(0, int(frame_index))
+    candidate = target_dir / f"{safe_preview_name(source)}_{suffix}.jpg"
+    if len(str(candidate)) > 240:
+        key = hashlib.sha256(f"{source}\0{suffix}\0{frame}".encode()).hexdigest()[:24]
+        candidate = target_dir / f"{key}.jpg"
+    target = candidate
+    try:
+        if target.exists() and target.stat().st_mtime_ns >= source.stat().st_mtime_ns:
+            return rel(target)
+    except OSError:
+        pass
+    vf = f"trim=start_frame={frame}:end_frame={frame + 1},setpts=PTS-STARTPTS"
+    command = [ffmpeg, "-y", "-i", str(source), "-vf", vf, "-frames:v", "1", "-q:v", str(quality), str(target)]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0 and frame != 0:
+        return extract_video_frame_at_frame(source, target_dir, suffix, 0, quality)
+    return rel(target) if result.returncode == 0 and target.exists() else ""
+
 def ffprobe_basic_info(source: Path) -> dict[str, str]:
     found = local_tool("ffprobe")
     if not found:

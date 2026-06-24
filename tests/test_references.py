@@ -47,6 +47,60 @@ class ReferenceScrubTests(unittest.TestCase):
         finally:
             state.APP = previous_app
 
+    def test_extract_reference_frame_uses_exact_frame_when_provided(self) -> None:
+        previous_app = state.APP
+        state.APP = SimpleNamespace(log=[], settings={"references": {}})
+        try:
+            with tempfile.TemporaryDirectory(dir=references.ROOT) as tmp_text:
+                folder = Path(tmp_text)
+                source = folder / "source.mp4"
+                source.write_bytes(b"video placeholder")
+                manifest = folder / "shots.csv"
+                write_manifest_details(
+                    manifest,
+                    references.rel(source),
+                    ["start", "end", "source_reference", "color_reference"],
+                    [{
+                        "start": "00:00:00.000",
+                        "end": "00:00:02.000",
+                        "source_reference": "",
+                        "color_reference": "",
+                    }],
+                )
+
+                fake_result = SimpleNamespace(returncode=0, stderr="", stdout="")
+                with (
+                    mock.patch.object(references, "local_tool", return_value="ffmpeg"),
+                    mock.patch.object(references.subprocess, "run", return_value=fake_result) as run,
+                ):
+                    result = references.extract_reference_frame(references.rel(manifest), 0, 1.251, frame=30)
+
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index("-vf") + 1], "trim=start_frame=30:end_frame=31,setpts=PTS-STARTPTS")
+                self.assertEqual(read_manifest(manifest)[0]["selected_frame"], "30")
+                self.assertEqual(result["selected_frame"], "30")
+        finally:
+            state.APP = previous_app
+
+    def test_preview_reference_frame_can_use_exact_frame(self) -> None:
+        with tempfile.TemporaryDirectory(dir=references.ROOT) as tmp_text:
+            folder = Path(tmp_text)
+            source = folder / "source.mp4"
+            source.write_bytes(b"video placeholder")
+            manifest = folder / "shots.csv"
+            write_manifest_details(
+                manifest,
+                references.rel(source),
+                ["start", "end", "source_reference", "color_reference"],
+                [{"start": "00:00:00.000", "end": "00:00:02.000", "source_reference": "", "color_reference": ""}],
+            )
+
+            with mock.patch.object(references, "extract_video_frame_at_frame", return_value="preview.jpg") as exact:
+                path = references.preview_reference_frame(references.rel(manifest), 0, 1.251, frame=30)
+
+        self.assertEqual(path, "preview.jpg")
+        self.assertEqual(exact.call_args.args[3], 30)
+
 
 if __name__ == "__main__":
     unittest.main()

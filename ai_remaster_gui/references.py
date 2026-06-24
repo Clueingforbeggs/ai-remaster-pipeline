@@ -11,7 +11,7 @@ from . import state
 from .config import IMAGE_EXTS, PREVIEW_DIR, QWEN_IMAGE_EDIT_MODEL, REFERENCE_PROMPT, REFERENCE_PROMPT_SUFFIX, ROOT, SCRIPTS, comfy_output_root_for, current_config
 from .file_dialogs import browse_path
 from .manifests import manifest_source_video, read_manifest, read_manifest_details, update_manifest_row, write_manifest_details
-from .media import extract_video_frame_at, ffprobe_info, local_tool, safe_preview_name
+from .media import extract_video_frame_at, extract_video_frame_at_frame, ffprobe_info, local_tool, safe_preview_name
 from .naming import manifest_for_outpainted
 from .paths import format_timecode, rel, resolve, safe_stem
 from .runtime_settings import qwen_masked_workflow_for, qwen_workflow_for
@@ -127,11 +127,17 @@ def shot_rows(manifest_text: str, include_previews: bool = False) -> list[dict[s
                 "prompt": row.get("prompt", ""),
             }
         if include_previews:
-            mid = (start + end) / 2 if end > start else start
-            end_preview = max(start, (end_frame_exclusive - 1) / fps)
-            for key, value in (("start_preview", start), ("middle_preview", mid), ("end_preview", end_preview)):
+            last_frame = max(start_frame, end_frame_exclusive - 1)
+            mid_frame = start_frame + max(0, (end_frame_exclusive - start_frame - 1) // 2)
+            mid = mid_frame / fps
+            end_preview = last_frame / fps
+            for key, value, frame in (
+                ("start_preview", start, start_frame),
+                ("middle_preview", mid, mid_frame),
+                ("end_preview", end_preview, last_frame),
+            ):
                 try:
-                    item[key] = preview_reference_frame(manifest_text, index, value)
+                    item[key] = preview_reference_frame(manifest_text, index, value, frame=frame)
                 except Exception:
                     item[key] = ""
         out.append(item)
@@ -481,7 +487,7 @@ def install_custom_color_reference(manifest_text: str, index: int) -> dict[str, 
     state.APP.log.append(f"Installed custom color reference for shot {index + 1}: {rel(target)}")
     return {"selected": selected, "color_reference": rel(target)}
 
-def extract_reference_frame(manifest_text: str, index: int, seconds: float) -> dict[str, str]:
+def extract_reference_frame(manifest_text: str, index: int, seconds: float, frame: int | None = None) -> dict[str, str]:
     manifest = resolve(manifest_text)
     source_video, _fields, rows = read_manifest_details(manifest)
     if not source_video:
@@ -499,12 +505,16 @@ def extract_reference_frame(manifest_text: str, index: int, seconds: float) -> d
     if not ffmpeg:
         raise RuntimeError("Run install_windows.bat to install local FFmpeg for shot scrubbing.")
     new_source.parent.mkdir(parents=True, exist_ok=True)
-    command = [ffmpeg, "-y", "-ss", f"{seconds:.3f}", "-i", str(resolve(source_video)), "-frames:v", "1", "-q:v", "2", str(new_source)]
+    selected_frame = max(0, int(frame)) if frame is not None else int(round(max(0.0, seconds) * manifest_fps(manifest)))
+    if frame is not None:
+        vf = f"trim=start_frame={selected_frame}:end_frame={selected_frame + 1},setpts=PTS-STARTPTS"
+        command = [ffmpeg, "-y", "-i", str(resolve(source_video)), "-vf", vf, "-frames:v", "1", "-q:v", "2", str(new_source)]
+    else:
+        command = [ffmpeg, "-y", "-ss", f"{seconds:.3f}", "-i", str(resolve(source_video)), "-frames:v", "1", "-q:v", "2", str(new_source)]
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "ffmpeg failed").strip())
     new_color = color_reference_for_source(rel(new_source))
-    selected_frame = int(round(max(0.0, seconds) * manifest_fps(manifest)))
     update_manifest_row(manifest, index, {
         "source_reference": rel(new_source),
         "color_reference": new_color,
@@ -513,7 +523,7 @@ def extract_reference_frame(manifest_text: str, index: int, seconds: float) -> d
     state.APP.log.append(f"Updated shot {index + 1} reference frame to {format_timecode(seconds)}: {rel(new_source)}")
     return {"source_reference": rel(new_source), "color_reference": new_color, "selected_frame": str(selected_frame)}
 
-def preview_reference_frame(manifest_text: str, index: int, seconds: float) -> str:
+def preview_reference_frame(manifest_text: str, index: int, seconds: float, frame: int | None = None) -> str:
     manifest = resolve(manifest_text)
     source_video, _fields, rows = read_manifest_details(manifest)
     if not source_video:
@@ -523,6 +533,8 @@ def preview_reference_frame(manifest_text: str, index: int, seconds: float) -> s
     source = resolve(source_video)
     target_dir = PREVIEW_DIR / "shot_scrub" / safe_preview_name(manifest)
     target_dir.mkdir(parents=True, exist_ok=True)
+    if frame is not None:
+        return extract_video_frame_at_frame(source, target_dir, f"shot_{index:04d}_frame_{max(0, int(frame)):010d}", int(frame))
     target = target_dir / f"shot_{index:04d}_{int(seconds * 1000):010d}.jpg"
     if target.exists():
         return rel(target)
